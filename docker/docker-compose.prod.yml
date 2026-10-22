@@ -1,0 +1,17 @@
+# Production overrides, layered on top of docker-compose.yml:
+#   docker compose -f docker/docker-compose.yml -f docker/docker-compose.prod.yml up -d --build
+# Turns off the demo token issuer; tokens must come from your identity provider (Auth0, Keycloak, Okta...).
+# Required in docker/.env: OPENMESH_JWT_JWK_SET_URI, OPENMESH_JWT_ISSUER (see docker/.env.example).
+
+services:
+  openmesh-gateway:
+    environment:
+      SPRING_PROFILES_ACTIVE: prod
+      OPENMESH_ENVIRONMENT: production
+      REDIS_SSL: "false"   # Redis is only reachable on the private Docker network
+      OPENMESH_JWT_JWK_SET_URI: ${OPENMESH_JWT_JWK_SET_URI:?set OPENMESH_JWT_JWK_SET_URI in docker/.env}
+      OPENMESH_JWT_ISSUER: ${OPENMESH_JWT_ISSUER:?set OPENMESH_JWT_ISSUER in docker/.env}
+      OPENMESH_JWT_AUDIENCE: ${OPENMESH_JWT_AUDIENCE:-}
+      OPENMESH_JWT_TENANT_CLAIM: ${OPENMESH_JWT_TENANT_CLAIM:-tenant_id}
+      OPENMESH_JWT_ROLES_CLAIM: ${OPENMESH_JWT_ROLES_CLAIM:-roles}
+      OPENMESH_JWT_TIER_CLAIM: ${OPENMESH_JWT_TIER_CLAIM:-tier}
