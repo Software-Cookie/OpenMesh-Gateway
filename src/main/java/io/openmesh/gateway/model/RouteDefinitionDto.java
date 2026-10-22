@@ -1,8 +1,10 @@
 package io.openmesh.gateway.model;
 
 import com.fasterxml.jackson.annotation.JsonInclude;
+import com.fasterxml.jackson.annotation.JsonProperty;
 import jakarta.validation.constraints.NotBlank;
-import jakarta.validation.constraints.NotNull;
+import jakarta.validation.constraints.NotEmpty;
+import jakarta.validation.constraints.Size;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
@@ -12,8 +14,16 @@ import org.springframework.cloud.gateway.handler.predicate.PredicateDefinition;
 import org.springframework.cloud.gateway.route.RouteDefinition;
 
 import java.net.URI;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.StringJoiner;
 
+/**
+ * Admin API representation of a route. Predicates and filters use the gateway's
+ * shortcut syntax, e.g. {@code Path=/orders/**} and {@code StripPrefix=1}.
+ */
 @Data
 @Builder
 @NoArgsConstructor
@@ -21,119 +31,96 @@ import java.util.*;
 @JsonInclude(JsonInclude.Include.NON_NULL)
 public class RouteDefinitionDto {
 
-    @NotBlank(message = "Route id must not be blank")
+    public static final String SOURCE_STATIC = "static";
+    public static final String SOURCE_DYNAMIC = "dynamic";
+
+    /** Validated by RouteValidator (on PUT the id comes from the URL). */
     private String id;
 
-    @NotBlank(message = "Tenant URI must not be blank")
+    @NotBlank(message = "uri is required")
+    @Size(max = 2048, message = "uri is too long")
     private String uri;
 
+    @NotEmpty(message = "at least one predicate is required, e.g. Path=/orders/**")
+    @Size(max = 10, message = "at most 10 predicates are allowed")
     @Builder.Default
-    private List<String> predicates = new ArrayList<>();
+    private List<@NotBlank @Size(max = 512) String> predicates = new ArrayList<>();
 
+    @Size(max = 20, message = "at most 20 filters are allowed")
     @Builder.Default
-    private List<String> filters = new ArrayList<>();
+    private List<@NotBlank @Size(max = 512) String> filters = new ArrayList<>();
 
     @Builder.Default
     private int order = 0;
 
     @Builder.Default
-    private Map<String, Object> metadata = new HashMap<>();
+    private Map<String, Object> metadata = new LinkedHashMap<>();
 
-    public static RouteDefinitionDto fromRouteDefinition(RouteDefinition routeDefinition) {
+    /** "static" (application.yml) or "dynamic" (Redis). Read-only. */
+    @JsonProperty(access = JsonProperty.Access.READ_ONLY)
+    private String source;
+
+    public static RouteDefinitionDto fromRouteDefinition(RouteDefinition definition, String source) {
         List<String> predicateTexts = new ArrayList<>();
-
-        if (routeDefinition.getPredicates() != null) {
-            for (PredicateDefinition pred : routeDefinition.getPredicates()) {
-                predicateTexts.add(formatPredicate(pred));
-            }
+        if (definition.getPredicates() != null) {
+            definition.getPredicates().forEach(p -> predicateTexts.add(format(p.getName(), p.getArgs())));
         }
-
         List<String> filterTexts = new ArrayList<>();
-        if (routeDefinition.getFilters() != null) {
-            for (FilterDefinition filter : routeDefinition.getFilters()) {
-                filterTexts.add(formatFilter(filter));
-            }
+        if (definition.getFilters() != null) {
+            definition.getFilters().forEach(f -> filterTexts.add(format(f.getName(), f.getArgs())));
         }
-
         return RouteDefinitionDto.builder()
-                .id(routeDefinition.getId())
-                .uri(routeDefinition.getUri() != null ? routeDefinition.getUri().toString() : "")
+                .id(definition.getId())
+                .uri(definition.getUri() != null ? definition.getUri().toString() : "")
                 .predicates(predicateTexts)
                 .filters(filterTexts)
-                .order(routeDefinition.getOrder())
-                .metadata(routeDefinition.getMetadata() != null ? new HashMap<>(routeDefinition.getMetadata())
-                        : new HashMap<>())
+                .order(definition.getOrder())
+                .metadata(definition.getMetadata() != null ? new LinkedHashMap<>(definition.getMetadata()) : new LinkedHashMap<>())
+                .source(source)
                 .build();
-
     }
 
-    private static String formatPredicate(PredicateDefinition pred) {
-        // Implementation for formatting predicate
-        if (pred == null)
-            return "";
-
-        if (pred.getArgs() == null || pred.getArgs().isEmpty())
-            return pred.getName();
-
-        boolean positional = pred.getArgs().keySet().stream().allMatch(k -> k.startsWith("_genkey_"));
-        if (positional) {
-            return pred.getName() + "=" + String.join(",", pred.getArgs().values());
+    /**
+     * Shortcut args (generated keys) render as {@code Name=a,b}; named args render as
+     * {@code Name=key:value,key:value} so nothing is hidden from operators.
+     */
+    static String format(String name, Map<String, String> args) {
+        if (args == null || args.isEmpty()) {
+            return name;
         }
-        StringJoiner sj = new StringJoiner(",");
-        pred.getArgs().forEach((k, v) -> sj.add(k + ":" + v));
-        return pred.getName();
-    }
-    
-
-
-
-    private static String formatFilter(FilterDefinition filter) {
-        // Implementation for formatting filter
-        if (filter == null)
-            return "";
-
-        if (filter.getArgs() == null || filter.getArgs().isEmpty())
-            return filter.getName();
-
-        boolean positional = filter.getArgs().keySet().stream().allMatch(k -> k.startsWith("_genkey_"));
-        if (positional) {
-            return filter.getName() + "=" + String.join(",", filter.getArgs().values());
+        boolean shortcut = args.keySet().stream().allMatch(k -> k.startsWith("_genkey_"));
+        if (shortcut) {
+            return name + "=" + String.join(",", args.values());
         }
-        StringJoiner sj = new StringJoiner(",");
-        filter.getArgs().forEach((k, v) -> sj.add(k + ":" + v));
-        return filter.getName();
+        // YAML lists arrive as "key.0", "key.1": show them as key:[a,b]
+        Map<String, List<String>> grouped = new LinkedHashMap<>();
+        args.forEach((k, v) -> grouped.computeIfAbsent(k.replaceFirst("\\.\\d+$", ""), x -> new ArrayList<>()).add(v));
+        StringJoiner joiner = new StringJoiner(",");
+        grouped.forEach((k, values) -> joiner.add(k + ":" + (values.size() == 1 ? values.get(0) : values.toString().replace(" ", ""))));
+        return name + "=" + joiner;
     }
 
-
-
-
-
+    /** Converts to a gateway RouteDefinition. Throws IllegalArgumentException on malformed input. */
     public RouteDefinition toRouteDefinition() {
         RouteDefinition definition = new RouteDefinition();
-        definition.setId(this.id);
-        definition.setUri(this.uri != null ? URI.create(this.uri) : null);
-        definition.setOrder(this.order);
+        definition.setId(id);
+        definition.setUri(URI.create(uri.trim()));
+        definition.setOrder(order);
 
-        List<PredicateDefinition> predicateDefs = new ArrayList<>();
-        if (this.predicates != null) {
-            for (String predicateText : this.predicates) {
-                predicateDefs.add(new PredicateDefinition(predicateText));
+        List<PredicateDefinition> predicateDefinitions = new ArrayList<>();
+        for (String text : predicates) {
+            predicateDefinitions.add(new PredicateDefinition(text.trim()));
+        }
+        definition.setPredicates(predicateDefinitions);
+
+        List<FilterDefinition> filterDefinitions = new ArrayList<>();
+        if (filters != null) {
+            for (String text : filters) {
+                filterDefinitions.add(new FilterDefinition(text.trim()));
             }
         }
-        definition.setPredicates(predicateDefs);
-
-        List<FilterDefinition> filterDefs = new ArrayList<>();
-        if (this.filters != null) {
-            for (String filterText : this.filters) {
-                filterDefs.add(new FilterDefinition(filterText));
-            }
-        }
-        definition.setFilters(filterDefs);
-
-        if (this.metadata != null) {
-            definition.setMetadata(new HashMap<>(this.metadata));
-        }
-
+        definition.setFilters(filterDefinitions);
+        definition.setMetadata(metadata != null ? new LinkedHashMap<>(metadata) : new LinkedHashMap<>());
         return definition;
     }
 }

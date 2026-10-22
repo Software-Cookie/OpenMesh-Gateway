@@ -1,80 +1,63 @@
--- Atomic Token Bucket Rate Limiter with Burst Support
--- KEYS[1]: State key (e.g., rate_limit:{tenant_id})
--- ARGV[1]: replenish_rate (tokens added per second)
--- ARGV[2]: capacity (maximum burst capacity)
--- ARGV[3]: now (current timestamp in epoch seconds with fractional precision)
--- ARGV[4]: requested_tokens (tokens requested, default 1)
+-- Atomic token bucket rate limiter.
+--
+-- KEYS[1]  bucket key, e.g. openmesh:rl:tenant:acme
+-- ARGV[1]  replenish rate (tokens added per second)
+-- ARGV[2]  burst capacity (maximum tokens in the bucket)
+-- ARGV[3]  tokens requested by this call (default 1)
+--
+-- Returns { allowed (1|0), remaining tokens, seconds }
+--   seconds = time until the bucket is full again (allowed)
+--           = time until enough tokens are available (rejected)
+--
+-- The clock comes from Redis itself so every gateway instance shares one time source.
 
-
-local rate_limit_key = KEYS[1]
-local replenish_rate = tonumber(ARGV[1])
+local key = KEYS[1]
+local rate = tonumber(ARGV[1])
 local capacity = tonumber(ARGV[2])
-local now = tonumber(ARGV[3])
-local requested = tonumber(ARGV[4])
+local requested = tonumber(ARGV[3])
 
-if requested == nil or requested <= 0 then 
-    requested = 1
+if rate == nil or rate < 0 then rate = 0 end
+if capacity == nil or capacity <= 0 then capacity = 1 end
+if requested == nil or requested <= 0 then requested = 1 end
+
+local time = redis.call('TIME')
+local now = tonumber(time[1]) + (tonumber(time[2]) / 1000000)
+
+local state = redis.call('HMGET', key, 'tokens', 'ts')
+local tokens = tonumber(state[1])
+local last = tonumber(state[2])
+
+if tokens == nil or last == nil then
+    tokens = capacity
+else
+    local elapsed = math.max(0, now - last)
+    tokens = math.min(capacity, tokens + elapsed * rate)
 end
 
--- Retrieve current state: [tokens, last_refreshed]
-
-local state = redis.call('HMGET', rate_limit_key, 'tokens', last_refreshed)
-local current_tokens = tonumber(state[1])
-local last_refreshed = tonumber(state[2])
-
-if current_tokens == nil or last_refreshed == nil then
-    --first time access for this bucket : start at full capacity
-    current_tokens = capacity
-    last_refreshed = now
-else 
-    --Compute refill based on elapsed time
-    local delta = math.max(0, now - last_refreshed)
-    local tokens_to_add = delta * replenish_rate
-    current_tokens = math.min(capacity, current_tokens + tokens_to_add)
-    last_refreshed = now
-end
-
--- Evaluate token avilability
 local allowed = 0
-local remaining = 0
-local wait_or_reset_time = 0
+local seconds = 0
 
-if current_tokens >= requested then
+if tokens >= requested then
     allowed = 1
-    current_tokens = current_tokens - requested
-    remaining = math.floor(current_tokens)
-    -- Reset time : seconds until bucket is completely full again
-    if replenish_rate > 0 then 
-        wait_or_reset_time = math.ceil((capacity - current_tokens) / replenish_rate)
-    else
-        wait_or_reset_time = 0
+    tokens = tokens - requested
+    if rate > 0 then
+        seconds = math.ceil((capacity - tokens) / rate)
     end
-else 
-    allowed = 0
-    remaining = math.floor(current_tokens)
-    --Retry after: seconds until at least 'requested' tokens are refilled
-    local deficit = requested - current_tokens
-    if replenish_rate > 0 then 
-        wait_or_reset_time = math.ceil(deficit / replenish_rate)
-        if wait_or_reset_time < 1 then 
-            wait_or_reset_time = 1
-        end 
+else
+    if rate > 0 then
+        seconds = math.max(1, math.ceil((requested - tokens) / rate))
     else
-        wait_or_reset_time = 60
+        seconds = 60
     end
 end
 
--- Update state in redis
-redis.call('HMSET', rate_limit_key, 'tokens', tostring(current_tokens), 'last_refreshed', tostring(last_refreshed))
+redis.call('HSET', key, 'tokens', tostring(tokens), 'ts', tostring(now))
 
--- Set TTL  to ensure unused keys expire automatically (2x fill time, at least 60 secconds)
-
+-- Idle buckets expire once they would have refilled completely (minimum 60s).
 local ttl = 60
-if replenish_rate > 0 then 
-    ttl = math.max(60, math.ceil((capacity / replenish_rate) * 2))
-end 
+if rate > 0 then
+    ttl = math.max(60, math.ceil(capacity / rate) * 2)
+end
+redis.call('EXPIRE', key, ttl)
 
-redis.call('EXPIRE', rate_limit_key, ttl)
-
--- return : {allowed (1 or 0), remaining_tokens, wait_or_reset_time}
-return {allowed , remaining, wait_or_reset_time}
+return { allowed, math.floor(tokens), seconds }

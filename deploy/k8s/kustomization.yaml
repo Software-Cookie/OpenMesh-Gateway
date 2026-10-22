@@ -1,0 +1,12 @@
+# kubectl apply -k deploy/k8s
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: openmesh
+resources:
+  - namespace.yaml
+  - config.yaml
+  - deployment.yaml
+  - networking.yaml
+images:
+  - name: ghcr.io/your-org/openmesh-gateway
+    newTag: "1.0.0"

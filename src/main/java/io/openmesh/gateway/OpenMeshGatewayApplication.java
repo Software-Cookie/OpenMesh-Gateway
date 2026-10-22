@@ -1,21 +1,17 @@
 package io.openmesh.gateway;
 
-import lombok.extern.slf4j.Slf4j;
+import io.openmesh.gateway.config.OpenMeshProperties;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.boot.context.properties.EnableConfigurationProperties;
+import org.springframework.scheduling.annotation.EnableScheduling;
 
-
-@Slf4j
 @SpringBootApplication
+@EnableScheduling
+@EnableConfigurationProperties(OpenMeshProperties.class)
 public class OpenMeshGatewayApplication {
 
     public static void main(String[] args) {
         SpringApplication.run(OpenMeshGatewayApplication.class, args);
-        log.info("--------------------------------------------------------------------");
-        log.info("  OpenMesh-Gateway: Reactive Multi-Tenant Control Plane Started     ");
-        log.info("  Java 21 LTS | Netty Reactive | Redis 7 Token Bucket | RS256 Auth  ");
-        log.info("--------------------------------------------------------------------");
-
     }
-
 }

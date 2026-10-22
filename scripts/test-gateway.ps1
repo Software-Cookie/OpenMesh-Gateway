@@ -1,89 +1,74 @@
-# OpenMesh-Gateway Automated Validation Script (PowerShell)
-param(
-    [string]$GatewayUrl = "http://localhost:8080"
-)
+# End-to-end smoke test against a running gateway started with the "dev" profile.
+#   .\scripts\test-gateway.ps1 [-GatewayUrl http://localhost:8080]
+param([string]$GatewayUrl = "http://localhost:8080")
 
-Write-Host "`n========================================================" -ForegroundColor Cyan
-Write-Host "  OpenMesh-Gateway: Automated Traffic & Security Test   " -ForegroundColor Cyan
-Write-Host "========================================================`n" -ForegroundColor Cyan
+$ErrorActionPreference = "Stop"
+$script:pass = 0; $script:fail = 0
 
-# 1. Health Check
-Write-Host "[1/7] Testing Gateway Health..." -ForegroundColor Yellow
-$health = Invoke-RestMethod -Uri "$GatewayUrl/actuator/health" -Method Get
-Write-Host "Gateway Health Status: $($health.status)" -ForegroundColor Green
-
-# 2. Mint RS256 JWT Token for Tenant
-Write-Host "`n[2/7] Generating RS256 Signed JWT Token for Tenant 'tenant-acme'..." -ForegroundColor Yellow
-$tokenBody = @{
-    tenantId = "tenant-acme"
-    userId = "alice-architect"
-    roles = @("ROLE_USER", "ROLE_ADMIN")
-    scopes = @("read", "write")
-    tier = "PRO"
-    expiresInMinutes = 60
-} | ConvertTo-Json
-
-$tokenRes = Invoke-RestMethod -Uri "$GatewayUrl/auth/token" -Method Post -Body $tokenBody -ContentType "application/json"
-$jwt = $tokenRes.token
-Write-Host "Generated JWT Token (first 40 chars): $($jwt.Substring(0, 40))..." -ForegroundColor Green
-
-# 3. Authenticated Request & Downstream Identity Header Propagation
-Write-Host "`n[3/7] Sending Authenticated Request to Downstream Alpha (/service-alpha/orders)..." -ForegroundColor Yellow
-$headers = @{
-    "Authorization" = "Bearer $jwt"
+function Check($name, $expected, $actual) {
+    if ("$expected" -eq "$actual") { Write-Host "  PASS  $name"; $script:pass++ }
+    else { Write-Host "  FAIL  $name (expected $expected, got $actual)"; $script:fail++ }
 }
-$alphaRes = Invoke-RestMethod -Uri "$GatewayUrl/service-alpha/orders" -Headers $headers -Method Get
-Write-Host "Downstream Alpha Response:" -ForegroundColor Green
-$alphaRes | ConvertTo-Json -Depth 5 | Write-Host
 
-# 4. Anti-Spoofing Verification
-Write-Host "`n[4/7] Testing Anti-Spoofing: Client attempts to inject forged identity headers..." -ForegroundColor Yellow
-$spoofedHeaders = @{
-    "Authorization" = "Bearer $jwt"
-    "X-User-Id" = "hacker-impostor"
-    "X-Tenant-Id" = "forged-tenant"
-    "X-Gateway-Verified" = "fake-verification"
-}
-$spoofedRes = Invoke-RestMethod -Uri "$GatewayUrl/service-alpha/orders" -Headers $spoofedHeaders -Method Get
-Write-Host "Downstream received X-User-Id: $($spoofedRes.headersReceived.'x-user-id') (Expected: alice-architect)" -ForegroundColor Green
-Write-Host "Downstream received X-Tenant-Id: $($spoofedRes.headersReceived.'x-tenant-id') (Expected: tenant-acme)" -ForegroundColor Green
-Write-Host "Downstream received X-Gateway-Verified: $($spoofedRes.headersReceived.'x-gateway-verified') (Expected: true)" -ForegroundColor Green
-
-# 5. Token Bucket Rate Limiting Test (Burst exhaustion)
-Write-Host "`n[5/7] Testing Token Bucket Rate Limiting (Firing burst requests)..." -ForegroundColor Yellow
-$rateLimitDropped = $false
-for ($i = 1; $i -le 25; $i++) {
+function Status($uri, $headers = @{}, $method = "GET", $body = $null) {
     try {
-        $resp = Invoke-WebRequest -Uri "$GatewayUrl/service-alpha/test" -Headers $headers -Method Get -SkipHttpErrorCheck
-        if ($resp.StatusCode -eq 429) {
-            Write-Host "Request #${i}: HTTP 429 Too Many Requests! Rate Limiter engaged successfully." -ForegroundColor Red
-            Write-Host "Retry-After: $($resp.Headers['Retry-After']) seconds" -ForegroundColor DarkYellow
-            Write-Host "X-RateLimit-Reset: $($resp.Headers['X-RateLimit-Reset'])" -ForegroundColor DarkYellow
-            $rateLimitDropped = $true
-            break
-        } else {
-            Write-Host "Request #${i}: HTTP $($resp.StatusCode) (Remaining: $($resp.Headers['X-RateLimit-Remaining']))" -ForegroundColor Gray
-        }
+        $params = @{ Uri = $uri; Headers = $headers; Method = $method; UseBasicParsing = $true }
+        if ($body) { $params.Body = $body; $params.ContentType = "application/json" }
+        return (Invoke-WebRequest @params).StatusCode
     } catch {
-        Write-Host "Request #${i}: $_" -ForegroundColor DarkRed
+        if ($_.Exception.Response) { return [int]$_.Exception.Response.StatusCode }
+        return 0
     }
 }
 
-# 6. Resilience4j Circuit Breaker & Timeout Fallbacks
-Write-Host "`n[6/7] Testing Circuit Breaker & Timeout Fallback Handlers..." -ForegroundColor Yellow
-$timeoutFallback = Invoke-RestMethod -Uri "$GatewayUrl/fallback/timeout" -Method Get -SkipHttpErrorCheck
-Write-Host "Timeout Fallback Response (HTTP 504): $($timeoutFallback.message)" -ForegroundColor DarkYellow
+function Token($body) {
+    (Invoke-RestMethod -Uri "$GatewayUrl/auth/token" -Method Post -ContentType "application/json" -Body ($body | ConvertTo-Json)).token
+}
 
-$cbFallback = Invoke-RestMethod -Uri "$GatewayUrl/fallback/service-unavailable" -Method Get -SkipHttpErrorCheck
-Write-Host "Service Unavailable Fallback Response (HTTP 503): $($cbFallback.message)" -ForegroundColor DarkYellow
+Write-Host "OpenMesh Gateway smoke test: $GatewayUrl"
 
-# 7. Prometheus Metrics Exporter
-Write-Host "`n[7/7] Checking Prometheus Metrics Exporter (/actuator/prometheus)..." -ForegroundColor Yellow
-$metrics = Invoke-WebRequest -Uri "$GatewayUrl/actuator/prometheus" -Method Get
-$openmeshMetrics = ($metrics.Content -split "`n") | Where-Object { $_ -match "openmesh_gateway" } | Select-Object -First 5
-Write-Host "Sample Prometheus Metrics:" -ForegroundColor Green
-$openmeshMetrics | ForEach-Object { Write-Host "  $_" -ForegroundColor Cyan }
+Write-Host "[1] Health"
+Check "gateway is UP" "UP" (Invoke-RestMethod "$GatewayUrl/actuator/health").status
 
-Write-Host "`n========================================================" -ForegroundColor Cyan
-Write-Host "  All OpenMesh-Gateway Automated Tests Completed!       " -ForegroundColor Cyan
-Write-Host "========================================================`n" -ForegroundColor Cyan
+Write-Host "[2] Tokens"
+$admin = Token @{ tenantId = "tenant-acme"; userId = "alice"; roles = @("ROLE_ADMIN"); scopes = @("read", "write"); tier = "PRO" }
+$free = Token @{ tenantId = "free-$(Get-Random)"; userId = "bob"; scopes = @("read"); tier = "FREE" }
+$A = @{ Authorization = "Bearer $admin" }
+$F = @{ Authorization = "Bearer $free" }
+
+Write-Host "[3] Security"
+Check "no token -> 401" 401 (Status "$GatewayUrl/service-alpha/orders")
+Check "admin API without token -> 401" 401 (Status "$GatewayUrl/admin/v1/routes")
+Check "admin API as non-admin -> 403" 403 (Status "$GatewayUrl/admin/v1/routes" $F)
+
+Write-Host "[4] Zero-trust identity"
+$spoof = $A.Clone(); $spoof["X-User-Id"] = "attacker"; $spoof["X-Tenant-Id"] = "victim"
+$echo = Invoke-RestMethod "$GatewayUrl/service-alpha/orders" -Headers $spoof
+Check "spoofed X-User-Id replaced" "alice" $echo.identity.userId
+Check "spoofed X-Tenant-Id replaced" "tenant-acme" $echo.identity.tenantId
+Check "downstream verified HMAC signature" "True" $echo.signature.valid
+
+Write-Host "[5] Rate limiting (FREE tier: burst 10)"
+$limited = 0
+1..25 | ForEach-Object { if ((Status "$GatewayUrl/service-beta/items" $F) -eq 429) { $limited++ } }
+Check "requests rejected with 429" $true ($limited -ge 5)
+
+Write-Host "[6] Resilience"
+Check "upstream 500 -> 502 fallback" 502 (Status "$GatewayUrl/service-beta/chaos/error?status=500" $A)
+Check "slow upstream -> 504 timeout" 504 (Status "$GatewayUrl/service-beta/chaos/delay?ms=2500" $A)
+
+Write-Host "[7] Dynamic routes"
+Check "invalid route rejected" 400 (Status "$GatewayUrl/admin/v1/routes" $A "POST" '{"id":"bad","uri":"http://169.254.169.254","predicates":["Path=/x/**"]}')
+Check "route created" 201 (Status "$GatewayUrl/admin/v1/routes" $A "POST" '{"id":"smoke-route","uri":"http://downstream-service-alpha:8081","predicates":["Path=/smoke/**"],"filters":["StripPrefix=1"]}')
+Start-Sleep -Seconds 1
+Check "route deleted" 204 (Status "$GatewayUrl/admin/v1/routes/smoke-route" $A "DELETE")
+
+Write-Host "[8] API keys"
+$key = Invoke-RestMethod "$GatewayUrl/admin/v1/api-keys" -Method Post -Headers $A -ContentType "application/json" -Body '{"name":"smoke","tenantId":"tenant-smoke","tier":"PRO","scopes":["read"]}'
+Check "API key authenticates" 200 (Status "$GatewayUrl/service-alpha/orders" @{ "X-API-Key" = $key.apiKey })
+Status "$GatewayUrl/admin/v1/api-keys/$($key.record.id)" $A "DELETE" | Out-Null
+Check "revoked key -> 401" 401 (Status "$GatewayUrl/service-alpha/orders" @{ "X-API-Key" = $key.apiKey })
+
+Write-Host ""
+Write-Host "Passed: $script:pass  Failed: $script:fail"
+if ($script:fail -gt 0) { exit 1 }

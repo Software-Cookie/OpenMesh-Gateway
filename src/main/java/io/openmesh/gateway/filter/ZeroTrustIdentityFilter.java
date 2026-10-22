@@ -1,26 +1,25 @@
 package io.openmesh.gateway.filter;
 
-
-
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import io.openmesh.gateway.model.FallbackResponse;
+import io.openmesh.gateway.config.OpenMeshProperties;
+import io.openmesh.gateway.model.ApiKeyRecord;
+import io.openmesh.gateway.model.RoutePolicy;
 import io.openmesh.gateway.model.TenantContext;
-import lombok.RequiredArgsConstructor;
+import io.openmesh.gateway.model.TenantContext.AuthMethod;
+import io.openmesh.gateway.security.ApiKeyAuthenticationToken;
+import io.openmesh.gateway.security.ClientIpResolver;
+import io.openmesh.gateway.security.IdentityHeaderSigner;
+import io.openmesh.gateway.security.JwtClaims;
+import io.openmesh.gateway.web.ErrorResponseWriter;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.cloud.gateway.filter.GatewayFilterChain;
 import org.springframework.cloud.gateway.filter.GlobalFilter;
 import org.springframework.cloud.gateway.route.Route;
 import org.springframework.cloud.gateway.support.ServerWebExchangeUtils;
 import org.springframework.core.Ordered;
-import org.springframework.core.io.buffer.DataBuffer;
 import org.springframework.http.HttpStatus;
-import org.springframework.http.HttpStatusCode;
-import org.springframework.http.MediaType;
 import org.springframework.http.server.reactive.ServerHttpRequest;
-import org.springframework.http.server.reactive.ServerHttpRequest.Builder;
-import org.springframework.http.server.reactive.ServerHttpResponse;
 import org.springframework.security.core.Authentication;
+import org.springframework.security.core.GrantedAuthority;
 import org.springframework.security.core.context.ReactiveSecurityContextHolder;
 import org.springframework.security.core.context.SecurityContext;
 import org.springframework.security.oauth2.jwt.Jwt;
@@ -29,215 +28,156 @@ import org.springframework.stereotype.Component;
 import org.springframework.web.server.ServerWebExchange;
 import reactor.core.publisher.Mono;
 
-import java.nio.charset.StandardCharsets;
 import java.time.Instant;
-import java.util.*;
-import java.util.stream.Collectors;
+import java.util.List;
 
-
+/**
+ * Zero-trust identity propagation for every routed request.
+ * <ol>
+ *   <li>Strips any identity headers the caller sent (anti-spoofing).</li>
+ *   <li>Builds a {@link TenantContext} from the verified JWT or API key; unauthenticated
+ *       callers on public routes become tenant "anonymous" keyed by client IP.</li>
+ *   <li>Enforces the route's required scopes (403 when missing).</li>
+ *   <li>Forwards the verified identity to the downstream service, HMAC-signed when a secret is set.</li>
+ * </ol>
+ */
 @Slf4j
 @Component
-@RequiredArgsConstructor 
 public class ZeroTrustIdentityFilter implements GlobalFilter, Ordered {
 
+    public static final int ORDER = Ordered.HIGHEST_PRECEDENCE + 50;
     public static final String TENANT_CONTEXT_ATTR = "openmesh.tenantContext";
+
     public static final String HEADER_USER_ID = "X-User-Id";
     public static final String HEADER_TENANT_ID = "X-Tenant-Id";
     public static final String HEADER_USER_ROLES = "X-User-Roles";
+    public static final String HEADER_USER_SCOPES = "X-User-Scopes";
+    public static final String HEADER_AUTH_METHOD = "X-Auth-Method";
     public static final String HEADER_GATEWAY_VERIFIED = "X-Gateway-Verified";
     public static final String HEADER_GATEWAY_TIMESTAMP = "X-Gateway-Timestamp";
+    public static final String HEADER_GATEWAY_SIGNATURE = "X-Gateway-Signature";
 
-    private final ObjectMapper objectMapper;
-    
-    @Override 
+    /** Headers only the gateway may set. Anything a client sends under these names is dropped. */
+    public static final List<String> IDENTITY_HEADERS = List.of(
+            HEADER_USER_ID, HEADER_TENANT_ID, HEADER_USER_ROLES, HEADER_USER_SCOPES, HEADER_AUTH_METHOD,
+            HEADER_GATEWAY_VERIFIED, HEADER_GATEWAY_TIMESTAMP, HEADER_GATEWAY_SIGNATURE);
+
+    private final OpenMeshProperties properties;
+    private final ClientIpResolver clientIpResolver;
+    private final IdentityHeaderSigner signer;
+    private final ErrorResponseWriter errorWriter;
+
+    public ZeroTrustIdentityFilter(OpenMeshProperties properties, ClientIpResolver clientIpResolver,
+                                   IdentityHeaderSigner signer, ErrorResponseWriter errorWriter) {
+        this.properties = properties;
+        this.clientIpResolver = clientIpResolver;
+        this.signer = signer;
+        this.errorWriter = errorWriter;
+    }
+
+    @Override
     public int getOrder() {
-        return Ordered.HIGHEST_PRECEDENCE + 50;
+        return ORDER;
     }
 
-    @Override 
+    @Override
     public Mono<Void> filter(ServerWebExchange exchange, GatewayFilterChain chain) {
-        ServerHttpRequest.Builder sanitizedRequestBuilder = exchange.getRequest().mutate()
-            .headers(httpHeaders -> {
-                httpHeaders.remove(HEADER_USER_ID);
-                httpHeaders.remove(HEADER_TENANT_ID);
-                httpHeaders.remove(HEADER_USER_ROLES);
-                httpHeaders.remove(HEADER_GATEWAY_VERIFIED);
-                httpHeaders.remove(HEADER_GATEWAY_TIMESTAMP);
-                });
-
         return ReactiveSecurityContextHolder.getContext()
-                .map(SecurityContext :: getAuthentication)
-                .defaultIfEmpty(createAnonymousAuth())
-                .flatMap(authentication -> processAuthentication(exchange, sanitizedRequestBuilder, authentication,
-                        chain));
+                .map(SecurityContext::getAuthentication)
+                .filter(Authentication::isAuthenticated)
+                .map(auth -> buildContext(auth, exchange))
+                .defaultIfEmpty(anonymousContext(exchange))
+                .flatMap(context -> authorizeAndForward(exchange, chain, context));
     }
 
-    private Mono<Void> processAuthentication(ServerWebExchange exchange, Builder reqBuilder,
-            Authentication auth, GatewayFilterChain chain) {
+    private Mono<Void> authorizeAndForward(ServerWebExchange exchange, GatewayFilterChain chain, TenantContext context) {
+        exchange.getAttributes().put(TENANT_CONTEXT_ATTR, context);
 
-        TenantContext tenantContext;
+        Route route = exchange.getAttribute(ServerWebExchangeUtils.GATEWAY_ROUTE_ATTR);
+        List<String> requiredScopes = route != null ? RoutePolicy.from(route.getMetadata()).requiredScopes() : List.of();
+        if (!requiredScopes.isEmpty()) {
+            if (!context.isAuthenticated()) {
+                return errorWriter.write(exchange, HttpStatus.UNAUTHORIZED, "UNAUTHENTICATED",
+                        "This route requires authentication");
+            }
+            List<String> missing = requiredScopes.stream().filter(s -> !context.getScopes().contains(s)).toList();
+            if (!missing.isEmpty() && !context.isAdmin()) {
+                log.warn("Scope check failed: user={} tenant={} route={} missing={}",
+                        context.getUserId(), context.getTenantId(), route.getId(), missing);
+                return errorWriter.write(exchange, HttpStatus.FORBIDDEN, "INSUFFICIENT_SCOPE",
+                        "Missing required scope(s): " + String.join(", ", missing));
+            }
+        }
+
+        return chain.filter(exchange.mutate().request(withIdentityHeaders(exchange.getRequest(), context)).build());
+    }
+
+    private ServerHttpRequest withIdentityHeaders(ServerHttpRequest request, TenantContext context) {
+        String roles = String.join(",", context.getRoles());
+        String scopes = String.join(" ", context.getScopes());
+        String method = context.getAuthMethod().name();
+        String timestamp = String.valueOf(Instant.now().toEpochMilli());
+        String apiKeyHeader = properties.getSecurity().getApiKeyHeader();
+
+        return request.mutate().headers(headers -> {
+            IDENTITY_HEADERS.forEach(headers::remove);
+            // API keys are secrets: never forward them to downstream services
+            headers.remove(apiKeyHeader);
+            headers.set(HEADER_USER_ID, context.getUserId());
+            headers.set(HEADER_TENANT_ID, context.getTenantId());
+            headers.set(HEADER_USER_ROLES, roles);
+            headers.set(HEADER_USER_SCOPES, scopes);
+            headers.set(HEADER_AUTH_METHOD, method);
+            headers.set(HEADER_GATEWAY_VERIFIED, "true");
+            headers.set(HEADER_GATEWAY_TIMESTAMP, timestamp);
+            signer.sign(context.getUserId(), context.getTenantId(), roles, scopes, method, timestamp)
+                    .ifPresent(signature -> headers.set(HEADER_GATEWAY_SIGNATURE, signature));
+        }).build();
+    }
+
+    private TenantContext buildContext(Authentication auth, ServerWebExchange exchange) {
+        String clientIp = clientIpResolver.resolve(exchange);
+        List<String> roles = auth.getAuthorities().stream()
+                .map(GrantedAuthority::getAuthority)
+                .filter(a -> a.startsWith("ROLE_"))
+                .toList();
 
         if (auth instanceof JwtAuthenticationToken jwtAuth) {
+            OpenMeshProperties.Jwt claims = properties.getSecurity().getJwt();
             Jwt jwt = jwtAuth.getToken();
-
-            String userId = jwt.getSubject() != null ? jwt.getSubject() : "unknown-user";
-            String tenantId = extractTenantId(jwt);
-            List<String> roles = jwtAuth.getAuthorities().stream()
-                    .map(a -> a.getAuthority())
-                    .collect(Collectors.toList());
-
-            List<String> scopes = extractScopes(jwt);
-            String tier = jwt.getClaimAsString("tier");
-            if (tier == null) {
-                tier = "PRO";
-            }
-
-            tenantContext = TenantContext.builder()
-                    .tenantId(tenantId)
-                    .userId(userId)
-                    .username(userId)
+            String tenant = JwtClaims.getString(jwt, claims.getTenantClaim());
+            return TenantContext.builder()
+                    .tenantId(tenant != null ? tenant : "tenant-" + jwt.getSubject())
+                    .userId(jwt.getSubject())
                     .roles(roles)
-                    .scopes(scopes)
-                    .tier(tier)
-                    .authenticated(true)
+                    .scopes(JwtClaims.scopes(jwt))
+                    .tier(JwtClaims.getString(jwt, claims.getTierClaim()))
+                    .authMethod(AuthMethod.JWT)
+                    .clientIp(clientIp)
                     .build();
-
-            Route route = exchange.getAttribute(ServerWebExchangeUtils.GATEWAY_ROUTE_ATTR);
-            if (route != null && route.getMetadata() != null) {
-                Object requiredScopesObj = route.getMetadata().get("requiredScopes");
-                if (requiredScopesObj != null) {
-                    List<String> requiredScopes = parseRequiredScopes(requiredScopesObj);
-                    boolean hasAllScopes = requiredScopes.stream()
-                            .allMatch(rs -> scopes.contains(rs) || roles.contains("ROLE_ADMIN"));
-
-                    if (!hasAllScopes) {
-                        log.warn("Access denied for user '{}', tenant '{}': missing required scopes {}",
-                                userId, tenantId, requiredScopes);
-                        return writeForbiddenResponse(exchange,
-                                "Insufficient scope permission. Required: " + requiredScopes);
-                    }
-
-                }
-
-            }
-        } else {
-
-            //Unauthorised or Public request
-
-            String tenantHeader = exchange.getRequest().getHeaders().getFirst("Tenant-ID");
-            if(tenantHeader == null || tenantHeader.isBlank()){
-                tenantHeader = exchange.getRequest().getHeaders().getFirst("X-API-Key");
-            }
-            if(tenantHeader == null || tenantHeader.isBlank()){
-                tenantHeader = TenantContext.DEFAULT_TENANT_ID;
-            }
-            tenantContext = TenantContext.builder()
-                    .tenantId(tenantHeader)
-                    .userId("anonymous")
-                    .username("anonymous")
-                    .roles(Collections.singletonList("ROLE_ANONYMOUS"))
-                    .scopes(Collections.emptyList())
-                    .tier("FREE")
-                    .authenticated(false)
+        }
+        if (auth instanceof ApiKeyAuthenticationToken apiKeyAuth) {
+            ApiKeyRecord record = apiKeyAuth.getRecord();
+            return TenantContext.builder()
+                    .tenantId(record.getTenantId())
+                    .userId("apikey:" + record.getId())
+                    .roles(roles)
+                    .scopes(record.getScopes())
+                    .tier(record.getTier())
+                    .authMethod(AuthMethod.API_KEY)
+                    .clientIp(clientIp)
                     .build();
-                
         }
-            //context info exchange attributes for downstream filters (RateLimiter, Metrics))
-        exchange.getAttributes().put(TENANT_CONTEXT_ATTR, tenantContext);
+        return anonymousContext(exchange);
+    }
 
-        //Inject cryptographically verified identity headers for downstream microservices
-
-        ServerHttpRequest mutatedRequest = reqBuilder
-                .header(HEADER_USER_ID, tenantContext.getUserId())
-                .header(HEADER_TENANT_ID, tenantContext.getTenantId())
-                .header(HEADER_USER_ROLES, String.join(",", tenantContext.getRoles()))
-                .header(HEADER_GATEWAY_VERIFIED, "true")
-                .header(HEADER_GATEWAY_TIMESTAMP, String.valueOf(Instant.now().toEpochMilli()))
+    private TenantContext anonymousContext(ServerWebExchange exchange) {
+        return TenantContext.builder()
+                .tenantId(TenantContext.ANONYMOUS)
+                .userId(TenantContext.ANONYMOUS)
+                .roles(List.of("ROLE_ANONYMOUS"))
+                .authMethod(AuthMethod.ANONYMOUS)
+                .clientIp(clientIpResolver.resolve(exchange))
                 .build();
-
-        return chain.filter(exchange.mutate().request(mutatedRequest).build());
-
-
     }
-
-    @SuppressWarnings("unchecked")
-    private List<String> parseRequiredScopes(Object requiredScopesObj) {
-        if (requiredScopesObj instanceof List<?> list) {
-            return list.stream().map(Object::toString).collect(Collectors.toList());
-        } else if (requiredScopesObj instanceof String s) {
-            return Arrays.stream(s.split("[, ]+")).filter(str -> !str.isBlank()).collect(Collectors.toList());
-
-        }
-        return Collections.emptyList();
-    }
-
-    //Method for create and define a anonymousAuth
-    private Authentication createAnonymousAuth() {
-        return new org.springframework.security.authentication.AnonymousAuthenticationToken("openmesh-anonymous",
-                "anonymous",
-                org.springframework.security.core.authority.AuthorityUtils.createAuthorityList("ROLE_ANONYMOUS"));
-    }
-    
-
-    //method for extracting the tenantId from the jwt\
-    private String extractTenantId(Jwt jwt) {
-        String tenantId = jwt.getClaimAsString("tenant_id");
-        if (tenantId == null || tenantId.isBlank()) {
-            tenantId = jwt.getClaimAsString("tenant");
-        }
-        if (tenantId == null || tenantId.isBlank()) {
-            tenantId = jwt.getClaimAsString("tenantId");
-        }
-        if (tenantId == null || tenantId.isBlank()) {
-            tenantId = TenantContext.DEFAULT_TENANT_ID;
-        }
-        return tenantId;
-    }
-
-    //method for extracting the scopes
-    private List<String> extractScopes(Jwt jwt) {
-        Object scopeObj = jwt.getClaims().get("scope");
-        if (scopeObj instanceof String s) {
-            return Arrays.stream(s.split(" "))
-                    .filter(str -> !str.isBlank())
-                    .collect(Collectors.toList());
-        } else if (scopeObj instanceof List<?> list) {
-            return list.stream().map(Object::toString).collect(Collectors.toList());
-        }
-        return Collections.emptyList();
-
-    }
-
-    //method for Forbidden Response
-    private Mono<Void> writeForbiddenResponse(ServerWebExchange exchange, String message) {
-        ServerHttpResponse response = exchange.getResponse();
-        response.setStatusCode(HttpStatus.FORBIDDEN);
-        response.getHeaders().setContentType(MediaType.APPLICATION_JSON);
-
-        FallbackResponse body = FallbackResponse.builder()
-                .timestamp(Instant.now().toString())
-                .status(HttpStatus.FORBIDDEN.value())
-                .error("Forbidden")
-                .message(message)
-                .path(exchange.getRequest().getPath().value())
-                .build();
-
-
-        try {
-            byte[] bytes = objectMapper.writeValueAsString(body).getBytes(StandardCharsets.UTF_8);
-            DataBuffer buffer = response.bufferFactory().wrap(bytes);
-            return response.writeWith(Mono.just(buffer));
-
-        } catch (JsonProcessingException e) {
-            return response.setComplete();
-        }
-    }
-
-
-
-    
-
-
-
-
 }

@@ -1,96 +1,88 @@
 package io.openmesh.gateway.service;
 
+import io.openmesh.gateway.config.OpenMeshProperties;
+import io.openmesh.gateway.config.RedisConfig;
 import io.openmesh.gateway.model.RateLimitResult;
-import io.openmesh.gateway.model.RateLimitTier;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.data.redis.core.ReactiveRedisTemplate;
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.data.redis.core.ReactiveStringRedisTemplate;
 import org.springframework.data.redis.core.script.RedisScript;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Mono;
 
-import java.time.Duration;
-import java.util.Collections;
+import java.util.ArrayList;
 import java.util.List;
 
-
+/**
+ * Distributed token-bucket rate limiting backed by an atomic Redis Lua script.
+ * All gateway instances share the same buckets, so limits hold across a cluster.
+ */
 @Slf4j
 @Service
-@RequiredArgsConstructor
 public class RateLimitService {
-    private final ReactiveRedisTemplate<String, String> reactiveStringRedisTemplate;
-    private final RedisScript<List> tokenBucketRedisScript;
 
+    public static final String KEY_PREFIX = "openmesh:rl:";
 
-/**
-     * Executes atomic Redis token bucket check.
-     *
-     * @param tenantId Tenant or API key identifier
-     * @param replenishRate Tokens added per second
-     * @param burstCapacity Maximum bucket capacity
-     * @param requestedTokens Tokens consumed by this request (typically 1)
-     * @return Mono<RateLimitResult>
+    private final ReactiveStringRedisTemplate redis;
+    @SuppressWarnings("rawtypes")
+    private final RedisScript<List> script;
+    private final OpenMeshProperties.RateLimit properties;
+
+    @SuppressWarnings("rawtypes")
+    public RateLimitService(ReactiveStringRedisTemplate redis,
+                            @Qualifier(RedisConfig.TOKEN_BUCKET_SCRIPT) RedisScript<List> script,
+                            OpenMeshProperties properties) {
+        this.redis = redis;
+        this.script = script;
+        this.properties = properties.getRateLimit();
+    }
+
+    /**
+     * @param bucketKey       caller identity, e.g. "tenant:acme" or "anon:public-route:10.0.0.7"
+     * @param replenishRate   tokens added per second
+     * @param burstCapacity   maximum bucket size
+     * @param requestedTokens tokens this request costs
      */
+    public Mono<RateLimitResult> checkRateLimit(String bucketKey, double replenishRate, double burstCapacity,
+                                                int requestedTokens) {
+        List<String> keys = List.of(KEY_PREFIX + bucketKey);
+        List<String> args = List.of(
+                String.valueOf(replenishRate),
+                String.valueOf(burstCapacity),
+                String.valueOf(Math.max(1, requestedTokens)));
 
-    public Mono<RateLimitResult> checkRateLimit(
-        String tenantId,
-        double replenishRate,
-        double burstCapacity,
-        int requestedTokens
-    ){
-        String key = "openmesh:ratelimit:" + tenantId;
-        double now = System.currentTimeMillis() / 1000.0;
-
-        List<String> keys = Collections.singletonList(key);
-        String[] args = new String[]{
-            String.valueOf(replenishRate),
-            String.valueOf(burstCapacity),
-            String.valueOf(now),
-            String.valueOf(requestedTokens)
-        };
-
-        return reactiveStringRedisTemplate.execute(tokenBucketRedisScript, keys, List.of(args))
-            .timeout(Duration.ofMillis(500))
-            .next()
-            .map(rawResult -> {
-                List<?> resultList = ((List<?>) rawResult);
-                long allowedNum = ((Number) resultList.get(0)).longValue();
-                long remaining = ((Number) resultList.get(1)).longValue();
-                long waitOrReset = ((Number) resultList.get(2)).longValue();
-
-                return RateLimitResult.builder()
-                        .allowed(allowedNum == 1L)
-                        .remainingTokens(remaining)
-                        .waitOrResetSeconds(waitOrReset)
-                        .tenantId(tenantId)
+        return redis.execute(script, keys, args)
+                .reduce(new ArrayList<Object>(), (acc, part) -> {
+                    acc.addAll(part);
+                    return acc;
+                })
+                .timeout(properties.getRedisTimeout())
+                .map(values -> RateLimitResult.builder()
+                        .allowed(asLong(values, 0) == 1L)
+                        .remainingTokens(asLong(values, 1))
+                        .waitOrResetSeconds(asLong(values, 2))
                         .replenishRate(replenishRate)
                         .burstCapacity(burstCapacity)
-                        .build();
-            })
-            .onErrorResume(e -> {
-                log.error("Redis rate limit evaluation failed for tenant'{}' : {}. Defaulting to fail-open.",
-                            tenantId, e.getMessage());
-
-
-                            return Mono.just(RateLimitResult.builder()
-                                .allowed(true)
-                                .remainingTokens((long) burstCapacity)
-                                .waitOrResetSeconds(0)
-                                .tenantId(tenantId)
-                                .replenishRate(replenishRate)
-                                .burstCapacity(burstCapacity)
-                                .build()
-                            );
-                        });
+                        .build())
+                .onErrorResume(e -> {
+                    log.warn("Rate limit check failed for '{}' ({}); policy is fail-{}", bucketKey,
+                            e.toString(), properties.isFailOpen() ? "open" : "closed");
+                    return Mono.just(RateLimitResult.builder()
+                            .allowed(properties.isFailOpen())
+                            .remainingTokens(properties.isFailOpen() ? (long) burstCapacity : 0)
+                            .waitOrResetSeconds(properties.isFailOpen() ? 0 : 1)
+                            .replenishRate(replenishRate)
+                            .burstCapacity(burstCapacity)
+                            .degraded(true)
+                            .build());
+                });
     }
 
-
-    public Mono<RateLimitResult> checkRateLimitForTier(String tenantId, RateLimitTier tier) {
-        return checkRateLimit(tenantId, tier.getReplenishRate(), tier.getBurstCapacity(), 1);
+    private static long asLong(List<Object> values, int index) {
+        if (values.size() <= index || values.get(index) == null) {
+            throw new IllegalStateException("Unexpected rate-limit script result: " + values);
+        }
+        Object value = values.get(index);
+        return value instanceof Number n ? n.longValue() : Long.parseLong(value.toString());
     }
-    
-    
-
-    
-    
 }
