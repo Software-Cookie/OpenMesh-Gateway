@@ -1,7 +1,0 @@
-D:\Projects\OpenMesh-Gateway\src\test\java\io\openmesh\gateway\controller\DevTokenControllerTest.java
-D:\Projects\OpenMesh-Gateway\src\test\java\io\openmesh\gateway\controller\DynamicRouteAdminControllerTest.java
-D:\Projects\OpenMesh-Gateway\src\test\java\io\openmesh\gateway\controller\FallbackControllerTest.java
-D:\Projects\OpenMesh-Gateway\src\test\java\io\openmesh\gateway\filter\TenantRateLimiterFilterTest.java
-D:\Projects\OpenMesh-Gateway\src\test\java\io\openmesh\gateway\filter\ZeroTrustIdentityFilterTest.java
-D:\Projects\OpenMesh-Gateway\src\test\java\io\openmesh\gateway\integration\GatewayEndToEndIntegrationTest.java
-D:\Projects\OpenMesh-Gateway\src\test\java\io\openmesh\gateway\service\RateLimitServiceTest.java

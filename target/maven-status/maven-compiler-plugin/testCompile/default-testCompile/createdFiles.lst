@@ -1,7 +1,0 @@
-io\openmesh\gateway\controller\DynamicRouteAdminControllerTest.class
-io\openmesh\gateway\controller\DevTokenControllerTest.class
-io\openmesh\gateway\filter\ZeroTrustIdentityFilterTest.class
-io\openmesh\gateway\integration\GatewayEndToEndIntegrationTest.class
-io\openmesh\gateway\controller\FallbackControllerTest.class
-io\openmesh\gateway\filter\TenantRateLimiterFilterTest.class
-io\openmesh\gateway\service\RateLimitServiceTest.class
