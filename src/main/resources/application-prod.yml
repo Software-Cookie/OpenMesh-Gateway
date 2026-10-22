@@ -1,0 +1,28 @@
+# Production profile. Requires real secrets from the environment (Kubernetes Secret, Vault...).
+#   OPENMESH_JWT_JWK_SET_URI or OPENMESH_JWT_PUBLIC_KEY_LOCATION   token verification
+#   OPENMESH_IDENTITY_SIGNING_SECRET                                 downstream header signing
+#   REDIS_HOST / REDIS_PASSWORD / REDIS_SSL                          managed Redis
+# Startup fails if the committed dev keys are configured under this profile.
+
+openmesh:
+  security:
+    dev-issuer:
+      enabled: false
+    identity-signing-secret: ${OPENMESH_IDENTITY_SIGNING_SECRET}
+
+spring:
+  data:
+    redis:
+      ssl:
+        enabled: ${REDIS_SSL:true}
+
+management:
+  endpoint:
+    health:
+      show-details: never
+
+logging:
+  level:
+    root: WARN
+    io.openmesh: INFO
+    org.springframework.cloud.gateway: WARN

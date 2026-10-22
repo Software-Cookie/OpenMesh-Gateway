@@ -2,88 +2,85 @@ package io.openmesh.gateway.repository;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import io.openmesh.gateway.model.RouteDefinitionDto;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.cloud.gateway.route.RouteDefinition;
 import org.springframework.cloud.gateway.route.RouteDefinitionRepository;
-import org.springframework.cloud.gateway.support.NotFoundException;
-import org.springframework.data.redis.core.ReactiveRedisTemplate;
+import org.springframework.data.redis.core.ReactiveStringRedisTemplate;
 import org.springframework.stereotype.Repository;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
+/**
+ * Stores dynamic routes in a Redis hash (route id -> RouteDefinition JSON).
+ * Spring Cloud Gateway merges these with the static routes from application.yml.
+ * If Redis is down the gateway keeps serving the routes it already has cached.
+ */
 @Slf4j
 @Repository
-@RequiredArgsConstructor
 public class RedisRouteDefinitionRepository implements RouteDefinitionRepository {
 
-    public static final String GATEWAY_ROUTES_HASH_KEY = "openmesh:gateway:dynamic_routes";
+    public static final String ROUTES_KEY = "openmesh:gateway:routes";
 
-    private final ReactiveRedisTemplate<String, String> reactiveStringRedisTemplate;
+    private final ReactiveStringRedisTemplate redis;
     private final ObjectMapper objectMapper;
+
+    public RedisRouteDefinitionRepository(ReactiveStringRedisTemplate redis, ObjectMapper objectMapper) {
+        this.redis = redis;
+        this.objectMapper = objectMapper;
+    }
 
     @Override
     public Flux<RouteDefinition> getRouteDefinitions() {
-        if (reactiveStringRedisTemplate == null || reactiveStringRedisTemplate.opsForHash() == null) {
-            return Flux.empty();
-        }
-        return reactiveStringRedisTemplate.opsForHash()
-                .values(GATEWAY_ROUTES_HASH_KEY)
-                .flatMap(rawJson -> {
+        return redis.<String, String>opsForHash().values(ROUTES_KEY)
+                .flatMap(json -> {
                     try {
-                        RouteDefinitionDto dto = objectMapper.readValue((String) rawJson, RouteDefinitionDto.class);
-                        return Mono.just(dto.toRouteDefinition());
-                    } catch (Exception e) {
-                        log.error("Failed to deserialize route from Redis: {}", rawJson, e);
+                        return Mono.just(objectMapper.readValue(json, RouteDefinition.class));
+                    } catch (JsonProcessingException e) {
+                        log.error("Skipping unreadable route definition in Redis: {}", e.getOriginalMessage());
                         return Mono.empty();
                     }
                 })
                 .onErrorResume(e -> {
-                    log.warn("Error reading route definitions from Redis: {}. Returning empty.", e.getMessage());
+                    log.warn("Could not load dynamic routes from Redis: {}", e.toString());
                     return Flux.empty();
                 });
     }
 
-    @Override
-    public Mono<Void> save(Mono<RouteDefinition> route) {
-        if (reactiveStringRedisTemplate == null || reactiveStringRedisTemplate.opsForHash() == null) {
-            return Mono.empty();
-        }
-        return route.flatMap(routeDef -> {
-            try {
-                RouteDefinitionDto dto = RouteDefinitionDto.fromRouteDefinition(routeDef);
-                String json = objectMapper.writeValueAsString(dto);
-                return reactiveStringRedisTemplate.opsForHash()
-                        .put(GATEWAY_ROUTES_HASH_KEY, routeDef.getId(), json)
-                        .doOnSuccess(v -> log.info("Successfully persisted dynamic route '{}' to Redis", routeDef.getId()))
-                        .then();
-            } catch (JsonProcessingException e) {
-                log.error("Error serializing route definition '{}'", routeDef.getId(), e);
-                return Mono.error(new IllegalArgumentException("Cannot serialize route definition", e));
-            }
-        });
+    /** Like {@link #getRouteDefinitions()} but propagates Redis errors (used by the admin API). */
+    public Mono<RouteDefinition> findById(String id) {
+        return redis.<String, String>opsForHash().get(ROUTES_KEY, id)
+                .flatMap(json -> Mono.fromCallable(() -> objectMapper.readValue(json, RouteDefinition.class)));
     }
 
+    public Flux<RouteDefinition> findAll() {
+        return redis.<String, String>opsForHash().values(ROUTES_KEY)
+                .flatMap(json -> Mono.fromCallable(() -> objectMapper.readValue(json, RouteDefinition.class)));
+    }
 
-    
+    public Mono<Long> count() {
+        return redis.opsForHash().size(ROUTES_KEY);
+    }
+
+    @Override
+    public Mono<Void> save(Mono<RouteDefinition> route) {
+        return route.flatMap(definition -> Mono.fromCallable(() -> objectMapper.writeValueAsString(definition))
+                .flatMap(json -> redis.opsForHash().put(ROUTES_KEY, definition.getId(), json))
+                .doOnSuccess(ok -> log.info("Stored dynamic route '{}'", definition.getId()))
+                .then());
+    }
+
+    /** Atomic create (HSETNX): emits false when a route with this id already exists. */
+    public Mono<Boolean> saveIfAbsent(RouteDefinition definition) {
+        return Mono.fromCallable(() -> objectMapper.writeValueAsString(definition))
+                .flatMap(json -> redis.opsForHash().putIfAbsent(ROUTES_KEY, definition.getId(), json));
+    }
+
     @Override
     public Mono<Void> delete(Mono<String> routeId) {
-        if (reactiveStringRedisTemplate == null || reactiveStringRedisTemplate.opsForHash() == null) {
-            return Mono.empty();
-        }
-        return routeId.flatMap(id ->
-                reactiveStringRedisTemplate.opsForHash()
-                        .remove(GATEWAY_ROUTES_HASH_KEY, id)
-                        .flatMap(removedCount -> {
-                            if (removedCount > 0) {
-                                log.info("Deleted dynamic route '{}' from Redis", id);
-                                return Mono.empty();
-                            } else {
-                                log.warn("Route '{}' not found in Redis for deletion", id);
-                                return Mono.error(new NotFoundException("Route definition not found: " + id));
-                            }
-                        })
-        );
+        return routeId.flatMap(id -> redis.opsForHash().remove(ROUTES_KEY, id)).then();
+    }
+
+    public Mono<Boolean> deleteIfExists(String id) {
+        return redis.opsForHash().remove(ROUTES_KEY, id).map(removed -> removed > 0);
     }
 }

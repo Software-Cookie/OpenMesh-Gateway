@@ -1,0 +1,27 @@
+# Build output
+target/
+*.class
+frontend/node_modules/
+frontend/dist/
+frontend/.node/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+.settings/
+.classpath
+.project
+.factorypath
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local secrets and environment
+.env
+docker/.env
+*.local.yml
+
+# Logs
+*.log

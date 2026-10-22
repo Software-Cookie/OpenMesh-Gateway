@@ -1,63 +1,54 @@
+// Downstream Beta: chaos service used to demonstrate circuit breakers and timeouts.
+//   /chaos/delay?ms=2500     responds after a delay (gateway times out at 1500 ms -> 504)
+//   /chaos/error?status=500  responds with an error status (gateway fallback -> 502)
+//   anything else            normal 200 response
 const http = require('http');
-const url = require('url');
 
-const PORT = 8082;
+const PORT = Number(process.env.PORT || 8082);
+const MAX_DELAY_MS = 30_000;
+
+function json(res, status, body) {
+    res.writeHead(status, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(body, null, 2));
+}
 
 const server = http.createServer((req, res) => {
-    const parsedUrl = url.parse(req.url, true);
-    const pathname = parsedUrl.pathname;
-    const query = parsedUrl.query;
+    req.resume();
+    const url = new URL(req.url, `http://localhost:${PORT}`);
+    const path = url.pathname;
 
-    console.log(`[Beta Chaos Service] Incoming ${req.method} ${pathname}`);
-
-    // Chaos simulation: Delayed response (>1500ms to trigger gateway timeout)
-    if (pathname.includes('/delay')) {
-        const delayMs = parseInt(query.ms || '2000', 10);
-        console.log(`Simulating latency delay of ${delayMs}ms...`);
-        setTimeout(() => {
-            res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({
-                service: 'downstream-service-beta',
-                status: 'DELAYED_RESPONSE_SUCCESS',
-                delayMs: delayMs,
-                timestamp: new Date().toISOString()
-            }, null, 2));
-        }, delayMs);
+    if (path.endsWith('/chaos/delay')) {
+        const delayMs = Math.min(Math.max(parseInt(url.searchParams.get('ms') || '2000', 10) || 0, 0), MAX_DELAY_MS);
+        setTimeout(() => json(res, 200, {
+            service: 'downstream-service-beta',
+            status: 'DELAYED_RESPONSE',
+            delayMs,
+            timestamp: new Date().toISOString(),
+        }), delayMs);
         return;
     }
 
-    // Chaos simulation: 5xx error to trigger circuit breaker failure threshold
-    if (pathname.includes('/error')) {
-        const statusCode = parseInt(query.status || '500', 10);
-        console.log(`Simulating downstream failure: HTTP ${statusCode}`);
-        res.writeHead(statusCode, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({
+    if (path.endsWith('/chaos/error')) {
+        let status = parseInt(url.searchParams.get('status') || '500', 10);
+        if (!(status >= 400 && status <= 599)) status = 500;
+        json(res, status, {
             service: 'downstream-service-beta',
             status: 'ERROR',
-            simulatedStatusCode: statusCode,
-            message: 'Simulated microservice internal error',
-            timestamp: new Date().toISOString()
-        }, null, 2));
+            simulatedStatusCode: status,
+            timestamp: new Date().toISOString(),
+        });
         return;
     }
 
-    // Normal response
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({
+    json(res, 200, {
         service: 'downstream-service-beta',
         status: 'UP',
-        timestamp: new Date().toISOString(),
         method: req.method,
         path: req.url,
-        headersReceived: {
-            'x-user-id': req.headers['x-user-id'] || null,
-            'x-tenant-id': req.headers['x-tenant-id'] || null,
-            'x-gateway-verified': req.headers['x-gateway-verified'] || null,
-            'traceparent': req.headers['traceparent'] || null
-        }
-    }, null, 2));
+        tenantId: req.headers['x-tenant-id'] || null,
+        userId: req.headers['x-user-id'] || null,
+        timestamp: new Date().toISOString(),
+    });
 });
 
-server.listen(PORT, '0.0.0.0', () => {
-    console.log(`Downstream Beta Chaos Service running on port ${PORT}`);
-});
+server.listen(PORT, '0.0.0.0', () => console.log(`downstream-service-beta listening on ${PORT}`));

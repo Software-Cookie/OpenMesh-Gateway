@@ -1,128 +1,186 @@
+# OpenMesh-Gateway base configuration.
+# Defaults here are production-safe. Local development: run with the "dev" profile
+#   mvn spring-boot:run -Dspring-boot.run.profiles=dev
+# Every value in ${...} can be overridden with an environment variable.
+
 server:
-    port: 8080
+  port: ${SERVER_PORT:8080}
+  shutdown: graceful
 
 spring:
-    application:
-        name: openmesh-gateway
-    data:
-        redis:
-            host: ${REDIS_HOST:localhost}
-            port: ${REDIS_PORT:6379}
-            timeout: 2000ms
-            connect-timeout: 2000ms
-    cloud:
-        gateway:
-            discovery:
-                locator:
-                    enabled: false
-            routes:
-                - id: alpha-service-route
-                  uri: ${DOWNSTREAM_ALPHA_URL:http://localhost:8081}
-                  predicates:
-                      - Path=/service-alpha/**
-                  filters:
-                      - StripPrefix=1
-                      - name: TenantRateLimiter
-                        args:
-                            replenishRate: 10.0
-                            burstCapacity: 20.0
-                            requestedTokens: 1
-                            tier: PRO
-                      - name: CircuitBreaker
-                        args:
-                            name: alphaCircuitBreaker
-                            fallbackUri: forward:/fallback/service-unavailable
-                  metadata:
-                      requiredScopes:
-                          - read
+  application:
+    name: openmesh-gateway
+  lifecycle:
+    timeout-per-shutdown-phase: 20s
+  jackson:
+    default-property-inclusion: non_null
+    deserialization:
+      fail-on-unknown-properties: false
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      password: ${REDIS_PASSWORD:}
+      ssl:
+        enabled: ${REDIS_SSL:false}
+      timeout: 1s
+      connect-timeout: 2s
+  cloud:
+    gateway:
+      # A bad dynamic route is skipped instead of breaking the whole routing table
+      fail-on-route-definition-error: false
+      httpclient:
+        connect-timeout: 2000
+        response-timeout: 10s
+        pool:
+          max-idle-time: 30s
+      discovery:
+        locator:
+          enabled: false
+      # Static routes. Per-route policy lives in metadata (see RoutePolicy):
+      #   requiredScopes: scopes the caller's token must contain
+      #   rateLimit: { enabled, replenishRate, burstCapacity } limits for anonymous callers
+      # Authenticated callers are rate limited by their plan tier (FREE / PRO / ENTERPRISE).
+      routes:
+        - id: alpha-service-route
+          uri: ${DOWNSTREAM_ALPHA_URL:http://localhost:8081}
+          predicates:
+            - Path=/service-alpha/**
+          filters:
+            - StripPrefix=1
+            - name: CircuitBreaker
+              args:
+                name: alphaCircuitBreaker
+                fallbackUri: forward:/fallback/service-unavailable
+                statusCodes:
+                  - 500
+                  - 502
+                  - 503
+                  - 504
+          metadata:
+            requiredScopes: read
 
-                - id: beta-chaos-service-route
-                  uri: ${DOWNSTREAM_BETA_URL:http://localhost:8082}
-                  predicates:
-                      - Path=/service-beta/**
-                  filters:
-                      - StripPrefix=1
-                      - name: TenantRateLimiter
-                        args:
-                            replenishRate: 5.0
-                            burstCapacity: 10.0
-                            requestedTokens: 1
-                            tier: FREE
-                      - name: CircuitBreaker
-                        args:
-                            name: betaCircuitBreaker
-                            fallbackUri: forward:/fallback/service-unavailable
+        - id: beta-chaos-service-route
+          uri: ${DOWNSTREAM_BETA_URL:http://localhost:8082}
+          predicates:
+            - Path=/service-beta/**
+          filters:
+            - StripPrefix=1
+            - name: CircuitBreaker
+              args:
+                name: betaCircuitBreaker
+                fallbackUri: forward:/fallback/service-unavailable
+                statusCodes:
+                  - 500
+                  - 502
+                  - 503
+                  - 504
 
-                - id: public-echo-route
-                  uri: ${DOWNSTREAM_ALPHA_URL:http://localhost:8081}
-                  predicates:
-                      - Path=/public/**
-                  filters:
-                      - StripPrefix=1
-                      - name: TenantRateLimiter
-                        args:
-                            replenishRate: 20.0
-                            burstCapacity: 40.0
+        - id: public-echo-route
+          uri: ${DOWNSTREAM_ALPHA_URL:http://localhost:8081}
+          predicates:
+            - Path=/public/**
+          filters:
+            - StripPrefix=1
+          metadata:
+            rateLimit:
+              replenishRate: 2
+              burstCapacity: 5
 
 resilience4j:
-    circuitbreaker:
-        configs:
-            default:
-                slidingWindowType: COUNT_BASED
-                slidingWindowSize: 10
-                minimumNumberOfCalls: 5
-                failureRateThreshold: 50.0
-                slowCallRateThreshold: 50.0
-                slowCallDurationThreshold: 1500ms
-                waitDurationInOpenState: 10s
-                permittedNumberOfCallsInHalfOpenState: 3
-                automaticTransitionFromOpenToHalfOpenEnabled: true
-        instances:
-            alphaCircuitBreaker:
-                baseConfig: default
-            betaCircuitBreaker:
-                baseConfig: default
-    timelimiter:
-        configs:
-            default:
-                timeoutDuration: 1500ms
-                cancelRunningFuture: true
-        instances:
-            alphaCircuitBreaker:
-                baseConfig: default
-            betaCircuitBreaker:
-                baseConfig: default
+  circuitbreaker:
+    configs:
+      default:
+        sliding-window-type: COUNT_BASED
+        sliding-window-size: 10
+        minimum-number-of-calls: 5
+        failure-rate-threshold: 50
+        slow-call-rate-threshold: 50
+        slow-call-duration-threshold: 1500ms
+        wait-duration-in-open-state: 10s
+        permitted-number-of-calls-in-half-open-state: 3
+        automatic-transition-from-open-to-half-open-enabled: true
+        register-health-indicator: true
+    instances:
+      alphaCircuitBreaker:
+        base-config: default
+      betaCircuitBreaker:
+        base-config: default
+  timelimiter:
+    configs:
+      default:
+        timeout-duration: 1500ms
+        cancel-running-future: true
+    instances:
+      alphaCircuitBreaker:
+        base-config: default
+      betaCircuitBreaker:
+        base-config: default
 
 management:
-    endpoints:
-        web:
-            exposure:
-                include: health,info,prometheus,metrics,gateway,circuitbreakers
-    endpoint:
-        health:
-            show-details: always
-        prometheus:
-            enabled: true
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus,metrics,circuitbreakers
+  endpoint:
+    health:
+      show-details: when-authorized
+      roles: ADMIN
+      probes:
+        enabled: true
+  health:
+    circuitbreakers:
+      enabled: true
+  info:
+    build:
+      enabled: true
+  prometheus:
     metrics:
-        export:
-            prometheus:
-                enabled: true
-        distribution:
-            percentiles:
-                openmesh.gateway.request.duration: 0.5, 0.9, 0.99
-            percentiles-histogram:
-                openmesh.gateway.request.duration: true
-                http.server.requests: true
+      export:
+        enabled: true
+  metrics:
+    tags:
+      application: ${spring.application.name}
+      environment: ${OPENMESH_ENVIRONMENT:production}
+    distribution:
+      percentiles-histogram:
+        openmesh.gateway.request.duration: true
+        http.server.requests: true
+      slo:
+        openmesh.gateway.request.duration: 50ms,100ms,250ms,500ms,1s
 
 openmesh:
-    security:
-        jwt:
-            public-key-path: classpath:certs/dev-public-key.pem
-            private-key-path: classpath:certs/dev-private-key.pem
+  security:
+    jwt:
+      issuer: ${OPENMESH_JWT_ISSUER:openmesh-gateway}
+      audience: ${OPENMESH_JWT_AUDIENCE:}
+      jwk-set-uri: ${OPENMESH_JWT_JWK_SET_URI:}
+      public-key-location: ${OPENMESH_JWT_PUBLIC_KEY_LOCATION:}
+      tenant-claim: ${OPENMESH_JWT_TENANT_CLAIM:tenant_id}
+      roles-claim: ${OPENMESH_JWT_ROLES_CLAIM:roles}
+      tier-claim: ${OPENMESH_JWT_TIER_CLAIM:tier}
+    dev-issuer:
+      enabled: false
+    identity-signing-secret: ${OPENMESH_IDENTITY_SIGNING_SECRET:}
+    public-paths:
+      - /public/**
+  rate-limit:
+    enabled: true
+    fail-open: ${OPENMESH_RATE_LIMIT_FAIL_OPEN:true}
+    redis-timeout: 250ms
+    anonymous-replenish-rate: 5
+    anonymous-burst-capacity: 10
+    trusted-proxy-hops: ${OPENMESH_TRUSTED_PROXY_HOPS:0}
+  routes:
+    allowed-schemes: http,https,lb
+    allowed-hosts: ${OPENMESH_ROUTE_ALLOWED_HOSTS:}
+  metering:
+    flush-interval: PT10S   # ISO-8601 duration
+    retention: 35d
+  audit:
+    max-entries: 1000
 
 logging:
-    level:
-        root: INFO
-        io.openmesh: DEBUG
-        org.springframework.cloud.gateway: INFO
-        org.springframework.security: INFO
+  level:
+    root: INFO
+    io.openmesh: INFO

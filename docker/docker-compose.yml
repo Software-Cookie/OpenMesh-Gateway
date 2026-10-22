@@ -1,19 +1,28 @@
-version: '3.8'
+# Local demo stack: gateway + Redis + two mock services + Prometheus + Grafana.
+#   docker compose -f docker/docker-compose.yml up --build
+# Override ports or secrets with a .env file next to this file (see .env.example).
+# The gateway runs with the "dev" profile here so the console can mint test tokens.
+
+name: openmesh
 
 services:
   openmesh-gateway:
     build:
       context: ..
       dockerfile: docker/Dockerfile
-    container_name: openmesh-gateway
+    image: openmesh-gateway:local
     restart: unless-stopped
     ports:
-      - "8080:8080"
+      - "${GATEWAY_PORT:-8080}:8080"
     environment:
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
-      - DOWNSTREAM_ALPHA_URL=http://downstream-service-alpha:8081
-      - DOWNSTREAM_BETA_URL=http://downstream-service-beta:8082
+      SPRING_PROFILES_ACTIVE: dev
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-openmesh-dev-redis}
+      DOWNSTREAM_ALPHA_URL: http://downstream-service-alpha:8081
+      DOWNSTREAM_BETA_URL: http://downstream-service-beta:8082
+      OPENMESH_IDENTITY_SIGNING_SECRET: ${IDENTITY_SIGNING_SECRET:-dev-only-identity-signing-secret-change-me}
+      OPENMESH_ENVIRONMENT: docker-demo
     depends_on:
       redis:
         condition: service_healthy
@@ -21,79 +30,72 @@ services:
         condition: service_started
       downstream-service-beta:
         condition: service_started
-    networks:
-      - openmesh-net
+    networks: [openmesh-net]
 
   redis:
-    image: redis:7-alpine
-    container_name: openmesh-redis
+    image: redis:7.4-alpine
     restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD:-openmesh-dev-redis}"]
     ports:
-      - "6379:6379"
-    command: ["redis-server", "--appendonly", "yes"]
+      - "127.0.0.1:${REDIS_PORT:-6379}:6379"
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD-SHELL", "redis-cli -a \"$${REDIS_PASSWORD:-openmesh-dev-redis}\" --no-auth-warning ping | grep PONG"]
       interval: 5s
       timeout: 3s
-      retries: 5
-    networks:
-      - openmesh-net
+      retries: 10
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-openmesh-dev-redis}
+    volumes:
+      - redis-data:/data
+    networks: [openmesh-net]
 
   downstream-service-alpha:
     image: node:20-alpine
-    container_name: downstream-service-alpha
     restart: unless-stopped
-    ports:
-      - "8081:8081"
     working_dir: /app
-    volumes:
-      - ./mock-downstream/alpha:/app
     command: ["node", "server.js"]
-    networks:
-      - openmesh-net
+    environment:
+      IDENTITY_SIGNING_SECRET: ${IDENTITY_SIGNING_SECRET:-dev-only-identity-signing-secret-change-me}
+    volumes:
+      - ./mock-downstream/alpha:/app:ro
+    networks: [openmesh-net]
 
   downstream-service-beta:
     image: node:20-alpine
-    container_name: downstream-service-beta
     restart: unless-stopped
-    ports:
-      - "8082:8082"
     working_dir: /app
-    volumes:
-      - ./mock-downstream/beta:/app
     command: ["node", "server.js"]
-    networks:
-      - openmesh-net
+    volumes:
+      - ./mock-downstream/beta:/app:ro
+    networks: [openmesh-net]
 
   prometheus:
-    image: prom/prometheus:latest
-    container_name: openmesh-prometheus
+    image: prom/prometheus:v2.54.1
     restart: unless-stopped
     ports:
-      - "9090:9090"
+      - "127.0.0.1:${PROMETHEUS_PORT:-9090}:9090"
     volumes:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
-    networks:
-      - openmesh-net
+      - ./prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+    networks: [openmesh-net]
 
   grafana:
-    image: grafana/grafana:latest
-    container_name: openmesh-grafana
+    image: grafana/grafana:11.2.0
     restart: unless-stopped
     ports:
-      - "3000:3000"
+      - "127.0.0.1:${GRAFANA_PORT:-3000}:3000"
     environment:
-      - GF_SECURITY_ADMIN_USER=admin
-      - GF_SECURITY_ADMIN_PASSWORD=admin
-      - GF_USERS_ALLOW_SIGN_UP=false
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
     volumes:
-      - ./grafana/provisioning:/etc/grafana/provisioning
-      - ./grafana/dashboards:/var/lib/grafana/dashboards
-    depends_on:
-      - prometheus
-    networks:
-      - openmesh-net
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on: [prometheus]
+    networks: [openmesh-net]
+
+volumes:
+  redis-data:
 
 networks:
   openmesh-net:
-    driver: bridge

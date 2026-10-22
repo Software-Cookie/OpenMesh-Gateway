@@ -1,0 +1,23 @@
+# Local development profile. Enables the dev token issuer and uses the committed dev key pair.
+# NEVER use this profile in a shared or production environment.
+
+openmesh:
+  security:
+    jwt:
+      public-key-location: classpath:certs/dev-public-key.pem
+      private-key-location: classpath:certs/dev-private-key.pem
+    dev-issuer:
+      enabled: true
+    identity-signing-secret: ${OPENMESH_IDENTITY_SIGNING_SECRET:dev-only-identity-signing-secret-change-me}
+
+management:
+  metrics:
+    tags:
+      environment: dev
+  endpoint:
+    health:
+      show-details: always
+
+logging:
+  level:
+    io.openmesh: DEBUG
