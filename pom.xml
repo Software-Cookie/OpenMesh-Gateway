@@ -20,7 +20,7 @@
         <java.version>21</java.version>
         <spring-cloud.version>2023.0.3</spring-cloud.version>
         <nimbus-jose-jwt.version>9.37.3</nimbus-jose-jwt.version>
-        <jacoco.version>0.8.12</jacoco.version>
+        <jacoco.version>0.8.15</jacoco.version>
         <frontend-maven-plugin.version>1.15.1</frontend-maven-plugin.version>
         <node.version>v20.17.0</node.version>
         <!-- 1.21.4+ supports Docker Engine 29 (minimum API 1.44) -->
