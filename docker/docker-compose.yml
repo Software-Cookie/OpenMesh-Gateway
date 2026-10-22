@@ -23,6 +23,8 @@ services:
       DOWNSTREAM_BETA_URL: http://downstream-service-beta:8082
       OPENMESH_IDENTITY_SIGNING_SECRET: ${IDENTITY_SIGNING_SECRET:-dev-only-identity-signing-secret-change-me}
       OPENMESH_ENVIRONMENT: docker-demo
+      # Set to 1 when a reverse proxy (Caddy, nginx) sits in front, so rate limits use the real client IP
+      OPENMESH_TRUSTED_PROXY_HOPS: ${TRUSTED_PROXY_HOPS:-0}
     depends_on:
       redis:
         condition: service_healthy
