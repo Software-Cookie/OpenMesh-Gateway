@@ -1,0 +1,18 @@
+# Netlify hosts the React console; every API call is forwarded to the gateway on the Oracle server.
+# Replace openmesh-siva.duckdns.org below with your own DuckDNS address.
+
+[build]
+  base    = "frontend"
+  command = "npm ci && npm run build"
+  publish = "dist"
+
+[build.environment]
+  NODE_VERSION = "20"
+
+# Files that exist in dist (index.html, /assets/...) are served by Netlify.
+# Everything else (/console/config, /auth/token, /admin/..., /service-alpha/...) goes to the gateway.
+[[redirects]]
+  from   = "/*"
+  to     = "https://openmesh-siva.duckdns.org/:splat"
+  status = 200
+  force  = false
