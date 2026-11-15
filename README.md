@@ -7,12 +7,11 @@ it authenticates every request, enforces per-tenant rate limits shared across a 
 with circuit breakers, reloads routes at runtime without restarts, and meters usage per tenant for billing.
 
 ![Java 21](https://img.shields.io/badge/Java-21-0B1F3A)
-![Spring Boot 3.3](https://img.shields.io/badge/Spring%20Boot-3.3-2563EB)
-![Spring Cloud Gateway](https://img.shields.io/badge/Spring%20Cloud%20Gateway-4.1-2563EB)
+![Spring Boot 3.5](https://img.shields.io/badge/Spring%20Boot-3.5-2563EB)
+![Spring Cloud Gateway](https://img.shields.io/badge/Spring%20Cloud%20Gateway-4.3-2563EB)
 ![Redis 7](https://img.shields.io/badge/Redis-7-0B1F3A)
 ![React 18](https://img.shields.io/badge/React-18%20%2B%20TypeScript-2563EB)
-![Tests](https://img.shields.io/badge/tests-56%20passing-2563EB)
-![Coverage](https://img.shields.io/badge/line%20coverage-85%25-0B1F3A)
+![Tests](https://img.shields.io/badge/tests-72-2563EB)
 
 ![Admin console](docs/images/console-overview.png)
 
@@ -26,13 +25,13 @@ with circuit breakers, reloads routes at runtime without restarts, and meters us
 | **API keys** | Machine-to-machine keys (`omk_…`, 256-bit) bound to a tenant, plan tier and scopes. Only the SHA-256 hash is stored; keys are revocable instantly and never forwarded downstream. |
 | **Scope-based authorization** | Each route declares `requiredScopes`; callers without them get `403 INSUFFICIENT_SCOPE`. Admin API requires `ROLE_ADMIN`. |
 | **Distributed rate limiting** | Atomic token bucket in a Redis Lua script using Redis server time, so limits hold across every gateway instance. Limits follow the tenant's plan (FREE / PRO / ENTERPRISE); anonymous callers are limited per route and client IP. Standard `X-RateLimit-*` and `Retry-After` headers. Configurable fail-open / fail-closed. |
-| **Dynamic routing** | Create, update and delete routes through a REST API or the console. Routes are stored in Redis and every instance reloads instantly through Redis Pub/Sub. Input is validated: unknown predicates/filters, SSRF targets (cloud metadata IPs), disallowed schemes and identity-header tampering are rejected. |
+| **Dynamic routing** | Create, update and delete routes through a REST API or the console. Routes are stored in Redis and every instance reloads instantly through Redis Pub/Sub. Input is validated: unknown predicates/filters, SSRF targets (cloud metadata and loopback addresses, hosts outside the allow-list), filters that let callers pick the upstream URI, `forward:` targets outside the fallback controller, disallowed schemes and identity-header tampering are rejected. |
 | **Resilience** | Resilience4j circuit breakers and time limiters per downstream. Fallbacks return a precise reason: `UPSTREAM_TIMEOUT` (504), `CIRCUIT_OPEN` (503), `UPSTREAM_ERROR` (502). |
 | **Usage metering** | Requests and rate-limit rejections per tenant per day, buffered in memory and flushed to Redis in batches (no Redis write on the hot path). CSV export from the console. |
 | **Audit log** | Every admin change (routes, API keys) is recorded with actor, action, target and time. |
 | **Observability** | Prometheus metrics (throughput, latency histograms, 429s, 5xx) per tenant and route, with cardinality protection. W3C `traceparent` propagation and `X-Trace-Id` / `X-Request-Id` on every response. Grafana dashboard and Prometheus alert rules included. |
 | **Admin console (React)** | React 18 + TypeScript single-page app: live traffic charts, route editor, API key management, a Postman-style API explorer, **one-click live demos** that prove each feature end to end, circuit-breaker state machine, usage analytics with CSV export, and an audit timeline. Built into the same jar. |
-| **Production ready** | Secure-by-default profiles (startup fails if dev keys or weak secrets are used in `prod`), graceful shutdown, liveness/readiness probes, non-root container, Kubernetes manifests (HPA, PDB, NetworkPolicy), CI with Testcontainers and image scanning. |
+| **Production ready** | Secure-by-default profiles (startup fails if dev keys or weak secrets are used in `prod`), actuator on a separate private port, structured JSON logs in `prod`, tuned upstream connection pools, graceful shutdown, liveness/readiness probes, non-root container, Kubernetes manifests (HPA, PDB, NetworkPolicy), CI with Testcontainers, dependency audit and image scanning. |
 
 ## Architecture
 
@@ -68,7 +67,7 @@ flowchart LR
 
 ## Quick start
 
-**Requirements:** Docker (for the full stack) or Java 21 + Maven + a local Redis.
+**Requirements:** Docker (for the full stack) or Java 21 + Maven + a local Redis. Node.js 24 for UI work.
 
 ```bash
 # Full demo stack: gateway, Redis, 2 mock services, Prometheus, Grafana
@@ -78,6 +77,7 @@ docker compose -f docker/docker-compose.yml up --build
 | URL | What |
 |---|---|
 | http://localhost:8080 | Admin console (click **Sign in as administrator**, then open **Live demos**) |
+| http://localhost:9080/actuator/health | Management port: health probes and `/actuator/prometheus` (bound to localhost) |
 | http://localhost:9090 | Prometheus (alerts under *Alerts*) |
 | http://localhost:3000 | Grafana, `admin` / `admin`, dashboard in the *OpenMesh* folder |
 
@@ -102,6 +102,7 @@ npm run dev        # http://localhost:5173, proxies API calls to the gateway on 
 ```
 
 **Smoke test** a running gateway: `./scripts/test-gateway.sh` (bash + jq) or `.\scripts\test-gateway.ps1` (PowerShell).
+Both take the gateway URL and the management URL (defaults `http://localhost:8080` and `http://localhost:9080`).
 
 ## Try it
 
@@ -142,8 +143,8 @@ No inline scripts or styles, so it runs under a strict Content-Security-Policy.
 
 | | |
 |---|---|
-| ![Dashboard](docs/images/console-overview.png) | ![Live demos](docs/images/console-demos.png) |
-| ![API explorer](docs/images/console-explorer.png) | ![Routes](docs/images/console-routes.png) |
+| ![Live traffic](docs/images/console-traffic.png) | ![Routes](docs/images/console-routes.png) |
+| ![Resilience](docs/images/console-resilience.png) | ![Usage](docs/images/console-usage.png) |
 
 ## API
 
@@ -160,14 +161,16 @@ All admin endpoints require a JWT with `ROLE_ADMIN`. Errors use one JSON shape:
 | `POST` | `/admin/v1/routes/refresh` | Reload routes on every instance |
 | `GET` `POST` | `/admin/v1/api-keys` | List / create API keys (plaintext returned once) |
 | `DELETE` | `/admin/v1/api-keys/{id}` | Revoke an API key |
+| `GET` | `/admin/v1/session` | The caller's identity as the gateway resolved it (used by the console to verify sign-in) |
 | `GET` | `/admin/v1/overview` | Dashboard KPIs, Redis status, circuit breakers |
 | `GET` | `/admin/v1/circuit-breakers` | Circuit breaker state and metrics |
 | `GET` | `/admin/v1/metrics/live` | Cumulative counters for live charts (requests, 429s, 5xx, latency, top routes) |
 | `GET` | `/admin/v1/usage?date=YYYY-MM-DD` | Per-tenant usage for a UTC day |
 | `GET` | `/admin/v1/audit?limit=50` | Recent admin actions |
 | `POST` | `/auth/token` | Development token issuer (`dev` profile only) |
-| `GET` | `/actuator/health/{liveness,readiness}` | Kubernetes probes |
-| `GET` | `/actuator/prometheus` | Metrics |
+| `GET` | `/console/config`, `/console/health` | Public console settings and overall status (no details) |
+| `GET` | `/actuator/health/{liveness,readiness}` | Kubernetes probes (**management port 9080 only**) |
+| `GET` | `/actuator/prometheus` | Metrics (**management port 9080 only**) |
 
 **Route policy** lives in route metadata, for YAML and dynamic routes alike:
 
@@ -194,11 +197,15 @@ metadata:
 | `OPENMESH_RATE_LIMIT_FAIL_OPEN` | `true` | Behaviour when Redis is unreachable |
 | `OPENMESH_TRUSTED_PROXY_HOPS` | `0` | Load balancers in front, for correct client IPs |
 | `OPENMESH_ROUTE_ALLOWED_HOSTS` | any | Host globs dynamic routes may target, e.g. `*.svc.cluster.local` |
+| `OPENMESH_ROUTE_ALLOW_LOOPBACK` | `false` (`true` in `dev`) | Whether dynamic routes may target localhost / 127.0.0.0/8 / ::1 |
+| `OPENMESH_UPSTREAM_MAX_CONNECTIONS` | `1000` | Connection pool size per downstream host |
+| `MANAGEMENT_PORT` | `9080` | Private port for actuator (probes, Prometheus). Never expose it publicly. |
+| `LOG_FORMAT` | `ecs` in `prod` | Structured log format: `ecs`, `logstash` or `gelf` |
 
 ## Testing
 
 ```bash
-mvn verify      # builds the UI, runs 12 UI tests + 44 backend tests; coverage in target/site/jacoco/index.html
+mvn verify      # builds the UI, runs 12 UI tests + 60 backend tests; coverage in target/site/jacoco/index.html
 ```
 
 * **Unit tests** for every filter, the validator, the rate-limit service, fallbacks, token issuing and signing.
@@ -211,7 +218,8 @@ mvn verify      # builds the UI, runs 12 UI tests + 44 backend tests; coverage i
 * `docker/Dockerfile`: multi-stage, layered Spring Boot image, non-root UID 10001, defaults to the `prod` profile.
 * `deploy/k8s/`: Kustomize manifests with 3 replicas, rolling updates, probes, HPA, PodDisruptionBudget,
   NetworkPolicy, restricted pod security and a read-only root filesystem. `kubectl apply -k deploy/k8s`
-* `.github/workflows/ci.yml`: build, tests, coverage artifact, image build and Trivy scan.
+* `docker/docker-compose.prod.yml`: production override (dev issuer off, IdP required, every secret required).
+* `.github/workflows/ci.yml`: dependency audit, build, tests, coverage artifact, image build and Trivy scan.
 
 ## Project structure
 
@@ -237,7 +245,7 @@ src/main/resources
 
 ## Tech stack
 
-Java 21 · Spring Boot 3.3 · Spring Cloud Gateway 4.1 (Netty, Project Reactor) · Spring Security OAuth2 Resource Server ·
+Java 21 · Spring Boot 3.5 · Spring Cloud Gateway 4.3 (Netty, Project Reactor) · Spring Security OAuth2 Resource Server ·
 Nimbus JOSE + JWT · Redis 7 (Lettuce, Lua, Pub/Sub) · Resilience4j · Micrometer + Prometheus · Grafana ·
 JUnit 5, Mockito, Reactor Test, Testcontainers, MockWebServer, JaCoCo · Docker · Kubernetes · GitHub Actions ·
-React 18 · TypeScript · Vite · Tailwind CSS · TanStack Query · React Router · Vitest + Testing Library.
+React 18 · TypeScript · Vite 6 · Tailwind CSS · TanStack Query · React Router 7 · Vitest 4 + Testing Library.

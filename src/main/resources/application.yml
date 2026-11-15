@@ -6,6 +6,11 @@
 server:
   port: ${SERVER_PORT:8080}
   shutdown: graceful
+  # Only the console's static files are compressed; proxied API responses pass through untouched
+  compression:
+    enabled: true
+    mime-types: text/html,text/css,text/javascript,application/javascript,image/svg+xml
+    min-response-size: 1KB
 
 spring:
   application:
@@ -27,65 +32,72 @@ spring:
       connect-timeout: 2s
   cloud:
     gateway:
-      # A bad dynamic route is skipped instead of breaking the whole routing table
-      fail-on-route-definition-error: false
-      httpclient:
-        connect-timeout: 2000
-        response-timeout: 10s
-        pool:
-          max-idle-time: 30s
-      discovery:
-        locator:
-          enabled: false
-      # Static routes. Per-route policy lives in metadata (see RoutePolicy):
-      #   requiredScopes: scopes the caller's token must contain
-      #   rateLimit: { enabled, replenishRate, burstCapacity } limits for anonymous callers
-      # Authenticated callers are rate limited by their plan tier (FREE / PRO / ENTERPRISE).
-      routes:
-        - id: alpha-service-route
-          uri: ${DOWNSTREAM_ALPHA_URL:http://localhost:8081}
-          predicates:
-            - Path=/service-alpha/**
-          filters:
-            - StripPrefix=1
-            - name: CircuitBreaker
-              args:
-                name: alphaCircuitBreaker
-                fallbackUri: forward:/fallback/service-unavailable
-                statusCodes:
-                  - 500
-                  - 502
-                  - 503
-                  - 504
-          metadata:
-            requiredScopes: read
+      server:
+        webflux:
+          # A bad dynamic route is skipped instead of breaking the whole routing table
+          fail-on-route-definition-error: false
+          httpclient:
+            connect-timeout: 2000
+            response-timeout: 10s
+            pool:
+              # Connections per downstream host. Waiting callers fail fast instead of queueing for 45s.
+              max-connections: ${OPENMESH_UPSTREAM_MAX_CONNECTIONS:1000}
+              acquire-timeout: 5000
+              max-idle-time: 30s
+              # Recycle connections so new downstream replicas behind a load balancer get traffic
+              max-life-time: 5m
+          discovery:
+            locator:
+              enabled: false
+          # Static routes. Per-route policy lives in metadata (see RoutePolicy):
+          #   requiredScopes: scopes the caller's token must contain
+          #   rateLimit: { enabled, replenishRate, burstCapacity } limits for anonymous callers
+          # Authenticated callers are rate limited by their plan tier (FREE / PRO / ENTERPRISE).
+          routes:
+            - id: alpha-service-route
+              uri: ${DOWNSTREAM_ALPHA_URL:http://localhost:8081}
+              predicates:
+                - Path=/service-alpha/**
+              filters:
+                - StripPrefix=1
+                - name: CircuitBreaker
+                  args:
+                    name: alphaCircuitBreaker
+                    fallbackUri: forward:/fallback/service-unavailable
+                    statusCodes:
+                      - 500
+                      - 502
+                      - 503
+                      - 504
+              metadata:
+                requiredScopes: read
 
-        - id: beta-chaos-service-route
-          uri: ${DOWNSTREAM_BETA_URL:http://localhost:8082}
-          predicates:
-            - Path=/service-beta/**
-          filters:
-            - StripPrefix=1
-            - name: CircuitBreaker
-              args:
-                name: betaCircuitBreaker
-                fallbackUri: forward:/fallback/service-unavailable
-                statusCodes:
-                  - 500
-                  - 502
-                  - 503
-                  - 504
+            - id: beta-chaos-service-route
+              uri: ${DOWNSTREAM_BETA_URL:http://localhost:8082}
+              predicates:
+                - Path=/service-beta/**
+              filters:
+                - StripPrefix=1
+                - name: CircuitBreaker
+                  args:
+                    name: betaCircuitBreaker
+                    fallbackUri: forward:/fallback/service-unavailable
+                    statusCodes:
+                      - 500
+                      - 502
+                      - 503
+                      - 504
 
-        - id: public-echo-route
-          uri: ${DOWNSTREAM_ALPHA_URL:http://localhost:8081}
-          predicates:
-            - Path=/public/**
-          filters:
-            - StripPrefix=1
-          metadata:
-            rateLimit:
-              replenishRate: 2
-              burstCapacity: 5
+            - id: public-echo-route
+              uri: ${DOWNSTREAM_ALPHA_URL:http://localhost:8081}
+              predicates:
+                - Path=/public/**
+              filters:
+                - StripPrefix=1
+              metadata:
+                rateLimit:
+                  replenishRate: 2
+                  burstCapacity: 5
 
 resilience4j:
   circuitbreaker:
@@ -118,6 +130,10 @@ resilience4j:
         base-config: default
 
 management:
+  # Actuator (health probes, Prometheus) listens on its own port so it is never reachable through
+  # the public listener. Keep this port private: cluster network, Docker network or localhost.
+  server:
+    port: ${MANAGEMENT_PORT:9080}
   endpoints:
     web:
       exposure:
@@ -174,6 +190,7 @@ openmesh:
   routes:
     allowed-schemes: http,https,lb
     allowed-hosts: ${OPENMESH_ROUTE_ALLOWED_HOSTS:}
+    allow-loopback: ${OPENMESH_ROUTE_ALLOW_LOOPBACK:false}
   metering:
     flush-interval: PT10S   # ISO-8601 duration
     retention: 35d

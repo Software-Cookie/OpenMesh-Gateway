@@ -126,6 +126,13 @@ export interface TokenResponse {
   tier: Tier;
 }
 
+export interface Session {
+  userId: string;
+  tenantId?: string;
+  roles: string[];
+  expiresAt?: string;
+}
+
 export interface JwtClaims {
   sub: string;
   iss?: string;

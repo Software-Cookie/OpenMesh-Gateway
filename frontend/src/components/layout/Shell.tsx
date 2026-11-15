@@ -88,7 +88,7 @@ function Navigation({ onNavigate }: { onNavigate?: () => void }) {
 }
 
 export function Shell({ children }: { children: ReactNode }) {
-  const { claims, signOut } = useAuth();
+  const { session, signOut } = useAuth();
   const { data: config } = useConsoleConfig();
   const [menuOpen, setMenuOpen] = useState(false);
   const location = useLocation();
@@ -113,8 +113,8 @@ export function Shell({ children }: { children: ReactNode }) {
             <HealthPill />
           </span>
           <div className="hidden min-w-0 text-right md:block">
-            <p className="truncate text-[13px] font-medium leading-tight">{claims?.sub}</p>
-            <p className="truncate text-[11px] leading-tight text-white/55">{claims?.tenant_id ?? 'no tenant'} · admin</p>
+            <p className="truncate text-[13px] font-medium leading-tight">{session?.userId}</p>
+            <p className="truncate text-[11px] leading-tight text-white/55">{session?.tenantId ?? 'no tenant'} · admin</p>
           </div>
           <button
             onClick={() => signOut()}
@@ -149,15 +149,10 @@ export function Shell({ children }: { children: ReactNode }) {
 }
 
 function SidebarFooter({ version }: { version?: string }) {
+  if (!version) return null;
   return (
-    <div className="space-y-1 border-t border-ink/[0.07] px-3 pt-4 text-[12.5px]">
-      <a className="block text-accent hover:underline" href="/actuator/health" target="_blank" rel="noreferrer">
-        Health endpoint
-      </a>
-      <a className="block text-accent hover:underline" href="/actuator/prometheus" target="_blank" rel="noreferrer">
-        Prometheus metrics
-      </a>
-      {version && <p className="pt-1 font-mono text-ink/40">v{version}</p>}
+    <div className="border-t border-ink/[0.07] px-3 pt-4 text-[12.5px]">
+      <p className="font-mono text-ink/40">v{version}</p>
     </div>
   );
 }

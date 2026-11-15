@@ -38,7 +38,7 @@ export function useHealth() {
   return useQuery({
     queryKey: keys.health,
     queryFn: async () => {
-      const result = await send<{ status: string }>('GET', '/actuator/health', { credentials: { kind: 'none' } });
+      const result = await send<{ status: string }>('GET', '/console/health', { credentials: { kind: 'none' } });
       return result.data?.status ?? 'UNKNOWN';
     },
     refetchInterval: 15_000,

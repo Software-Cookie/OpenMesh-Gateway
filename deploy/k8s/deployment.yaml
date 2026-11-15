@@ -17,7 +17,7 @@ spec:
       annotations:
         prometheus.io/scrape: "true"
         prometheus.io/path: /actuator/prometheus
-        prometheus.io/port: "8080"
+        prometheus.io/port: "9080"
     spec:
       serviceAccountName: openmesh-gateway
       automountServiceAccountToken: false
@@ -37,6 +37,8 @@ spec:
           imagePullPolicy: IfNotPresent
           ports:
             - { name: http, containerPort: 8080 }
+            # Health probes and Prometheus; not exposed by the Service or Ingress
+            - { name: management, containerPort: 9080 }
           envFrom:
             - configMapRef: { name: openmesh-gateway-config }
             - secretRef: { name: openmesh-gateway-secrets }
@@ -44,15 +46,15 @@ spec:
             requests: { cpu: 500m, memory: 512Mi }
             limits: { memory: 1Gi }
           startupProbe:
-            httpGet: { path: /actuator/health/liveness, port: http }
+            httpGet: { path: /actuator/health/liveness, port: management }
             periodSeconds: 5
             failureThreshold: 30
           livenessProbe:
-            httpGet: { path: /actuator/health/liveness, port: http }
+            httpGet: { path: /actuator/health/liveness, port: management }
             periodSeconds: 10
             failureThreshold: 3
           readinessProbe:
-            httpGet: { path: /actuator/health/readiness, port: http }
+            httpGet: { path: /actuator/health/readiness, port: management }
             periodSeconds: 5
             failureThreshold: 3
           lifecycle:

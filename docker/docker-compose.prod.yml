@@ -15,3 +15,14 @@ services:
       OPENMESH_JWT_TENANT_CLAIM: ${OPENMESH_JWT_TENANT_CLAIM:-tenant_id}
       OPENMESH_JWT_ROLES_CLAIM: ${OPENMESH_JWT_ROLES_CLAIM:-roles}
       OPENMESH_JWT_TIER_CLAIM: ${OPENMESH_JWT_TIER_CLAIM:-tier}
+      # Hosts dynamic routes may target, comma separated globs (e.g. "*.internal,orders-service")
+      OPENMESH_ROUTE_ALLOWED_HOSTS: ${ROUTE_ALLOWED_HOSTS:?set ROUTE_ALLOWED_HOSTS in docker/.env}
+      OPENMESH_IDENTITY_SIGNING_SECRET: ${IDENTITY_SIGNING_SECRET:?set IDENTITY_SIGNING_SECRET (32+ random characters) in docker/.env}
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?set REDIS_PASSWORD in docker/.env}
+
+  redis:
+    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD:?set REDIS_PASSWORD in docker/.env}"]
+
+  grafana:
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?set GRAFANA_ADMIN_PASSWORD in docker/.env}

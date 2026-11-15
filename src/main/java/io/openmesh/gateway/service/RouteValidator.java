@@ -31,6 +31,20 @@ public class RouteValidator {
     private static final double MAX_RATE = 100_000;
     private static final Pattern ROUTE_ID = Pattern.compile("^[A-Za-z0-9][A-Za-z0-9._-]{1,63}$");
 
+    /**
+     * Filters that are never allowed on dynamic routes: they let the caller choose the upstream URI
+     * (bypassing the host checks below) or read files from the gateway's filesystem.
+     */
+    private static final Set<String> BLOCKED_FILTERS = Set.of("RequestHeaderToRequestUri", "SetRequestUri", "JsonToGrpc");
+
+    /** forward: targets skip the security filter chain, so only the fallback controller may be used. */
+    private static final String FORWARD = "forward:";
+    private static final String ALLOWED_FORWARD_PREFIX = "forward:/fallback/";
+
+    private static final Pattern LOOPBACK_IPV4 = Pattern.compile("^127(\\.\\d{1,3}){3}$");
+    private static final Set<String> LOOPBACK_HOSTS = Set.of(
+            "localhost", "localhost.localdomain", "ip6-localhost", "0.0.0.0", "::", "::1", "0:0:0:0:0:0:0:1");
+
     private final Set<String> predicateNames;
     private final Set<String> filterNames;
     private final OpenMeshProperties.Routes properties;
@@ -67,11 +81,16 @@ public class RouteValidator {
                 }
             }
             for (FilterDefinition filter : definition.getFilters()) {
-                if (!filterNames.contains(filter.getName())) {
+                if (BLOCKED_FILTERS.contains(filter.getName())) {
+                    errors.add("filter '" + filter.getName() + "' is not allowed on dynamic routes");
+                } else if (!filterNames.contains(filter.getName())) {
                     errors.add("unknown filter '" + filter.getName() + "'");
                 }
                 if (touchesIdentityHeaders(filter)) {
                     errors.add("filter '" + filter.getName() + "' may not modify gateway identity headers");
+                }
+                if (forwardsOutsideFallback(filter)) {
+                    errors.add("filter '" + filter.getName() + "' may only forward to " + ALLOWED_FORWARD_PREFIX + "...");
                 }
             }
             validateMetadata(definition.getMetadata(), errors);
@@ -99,12 +118,23 @@ public class RouteValidator {
         }
         String normalized = host.toLowerCase(Locale.ROOT).replace("[", "").replace("]", "");
         if (properties.getBlockedHosts().stream().anyMatch(b -> b.equalsIgnoreCase(normalized))
-                || normalized.startsWith("169.254.")) {
+                || normalized.startsWith("169.254.")
+                || (!properties.isAllowLoopback() && isLoopback(normalized))) {
             errors.add("uri host '" + host + "' is blocked");
         }
         if (!allowedHostPatterns.isEmpty() && allowedHostPatterns.stream().noneMatch(p -> p.matcher(normalized).matches())) {
             errors.add("uri host '" + host + "' is not in the allowed host list");
         }
+    }
+
+    static boolean isLoopback(String host) {
+        return LOOPBACK_HOSTS.contains(host) || host.endsWith(".localhost") || LOOPBACK_IPV4.matcher(host).matches();
+    }
+
+    private static boolean forwardsOutsideFallback(FilterDefinition filter) {
+        return filter.getArgs().values().stream()
+                .map(v -> v.trim().toLowerCase(Locale.ROOT))
+                .anyMatch(v -> v.contains(FORWARD) && !v.startsWith(ALLOWED_FORWARD_PREFIX));
     }
 
     private static boolean touchesIdentityHeaders(FilterDefinition filter) {

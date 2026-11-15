@@ -30,13 +30,13 @@ export function SignIn() {
   async function submit(event: FormEvent) {
     event.preventDefault();
     setError(null);
-    if (effectiveMode === 'token') {
-      const problem = signIn(pasted);
-      if (problem) setError({ message: problem });
-      return;
-    }
     setBusy(true);
     try {
+      if (effectiveMode === 'token') {
+        const problem = await signIn(pasted);
+        if (problem) setError({ message: problem });
+        return;
+      }
       const result = await send<TokenResponse & ApiErrorBody>('POST', '/auth/token', {
         credentials: { kind: 'none' },
         body: {
@@ -52,7 +52,7 @@ export function SignIn() {
         setError({ message: result.data?.message ?? `Could not get a token (HTTP ${result.status})`, details: result.data?.details });
         return;
       }
-      const problem = signIn(result.data.token);
+      const problem = await signIn(result.data.token);
       if (problem) setError({ message: problem });
     } catch {
       setError({ message: 'The gateway is not reachable. Is it running?' });

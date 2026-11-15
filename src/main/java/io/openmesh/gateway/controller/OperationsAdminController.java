@@ -2,8 +2,10 @@ package io.openmesh.gateway.controller;
 
 import io.github.resilience4j.circuitbreaker.CircuitBreaker;
 import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
+import io.openmesh.gateway.config.OpenMeshProperties;
 import io.openmesh.gateway.model.AuditEvent;
 import io.openmesh.gateway.model.TenantUsage;
+import io.openmesh.gateway.security.JwtClaims;
 import io.openmesh.gateway.service.ApiKeyService;
 import io.openmesh.gateway.service.AuditService;
 import io.openmesh.gateway.service.DynamicRouteService;
@@ -11,6 +13,10 @@ import io.openmesh.gateway.service.TenantMeteringService;
 import io.openmesh.gateway.web.ApiException;
 import lombok.RequiredArgsConstructor;
 import org.springframework.data.redis.core.ReactiveStringRedisTemplate;
+import org.springframework.security.core.Authentication;
+import org.springframework.security.core.GrantedAuthority;
+import org.springframework.security.oauth2.jwt.Jwt;
+import org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationToken;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
@@ -19,6 +25,7 @@ import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
 import java.time.Duration;
+import java.time.Instant;
 import java.time.LocalDate;
 import java.time.format.DateTimeParseException;
 import java.util.Comparator;
@@ -38,9 +45,29 @@ public class OperationsAdminController {
     private final AuditService audit;
     private final CircuitBreakerRegistry circuitBreakerRegistry;
     private final ReactiveStringRedisTemplate redis;
+    private final OpenMeshProperties properties;
+
+    /** The signed-in operator as the gateway sees it, using the configured claim paths. */
+    public record SessionView(String userId, String tenantId, List<String> roles, Instant expiresAt) {
+    }
 
     public record CircuitBreakerView(String name, String state, float failureRate, float slowCallRate,
                                      int bufferedCalls, int failedCalls, long notPermittedCalls) {
+    }
+
+    /** Lets the console confirm a token is valid and admin-capable, whatever identity provider issued it. */
+    @GetMapping("/session")
+    public SessionView session(Authentication authentication) {
+        List<String> roles = authentication.getAuthorities().stream()
+                .map(GrantedAuthority::getAuthority)
+                .filter(a -> a.startsWith("ROLE_"))
+                .toList();
+        if (authentication instanceof JwtAuthenticationToken jwtAuth) {
+            Jwt jwt = jwtAuth.getToken();
+            String tenant = JwtClaims.getString(jwt, properties.getSecurity().getJwt().getTenantClaim());
+            return new SessionView(jwt.getSubject(), tenant, roles, jwt.getExpiresAt());
+        }
+        return new SessionView(authentication.getName(), null, roles, null);
     }
 
     @GetMapping("/overview")

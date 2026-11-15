@@ -115,6 +115,12 @@ public class OpenMeshProperties {
         /** Hosts that are never valid route targets (cloud metadata endpoints, SSRF protection). */
         private List<String> blockedHosts = new ArrayList<>(List.of(
                 "169.254.169.254", "metadata.google.internal", "metadata", "100.100.100.200", "fd00:ec2::254"));
+
+        /**
+         * Whether dynamic routes may target loopback addresses (localhost, 127.0.0.0/8, ::1, 0.0.0.0).
+         * Off by default: a loopback route could reach the gateway's own management port or sidecars.
+         */
+        private boolean allowLoopback = false;
     }
 
     @Data

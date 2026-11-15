@@ -82,8 +82,8 @@ public class SecurityConfig {
                 .authorizeExchange(exchanges -> exchanges
                         .pathMatchers(HttpMethod.OPTIONS).permitAll()
                         // Admin console static assets (data still requires an admin token)
-                        .pathMatchers("/", "/index.html", "/favicon.svg", "/assets/**", "/console/config").permitAll()
-                        // Liveness/readiness probes and Prometheus scraping
+                        .pathMatchers("/", "/index.html", "/favicon.svg", "/assets/**", "/console/config", "/console/health").permitAll()
+                        // Probes and Prometheus scraping, served on the private management port only
                         .pathMatchers("/actuator/health", "/actuator/health/**", "/actuator/info", "/actuator/prometheus").permitAll()
                         // Only registered when openmesh.security.dev-issuer.enabled=true
                         .pathMatchers(HttpMethod.POST, "/auth/token").permitAll()

@@ -22,6 +22,10 @@ management:
       show-details: never
 
 logging:
+  # One JSON object per line (Elastic Common Schema) for log shippers: Loki, ELK, CloudWatch, Datadog
+  structured:
+    format:
+      console: ${LOG_FORMAT:ecs}
   level:
     root: WARN
     io.openmesh: INFO

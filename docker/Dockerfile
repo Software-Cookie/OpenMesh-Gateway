@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
 # ---- UI stage: React console ----
-FROM node:20-alpine AS ui
+FROM node:24-alpine AS ui
 WORKDIR /ui
 COPY frontend/package.json frontend/package-lock.json ./
 RUN npm ci --no-audit --no-fund
@@ -38,12 +38,13 @@ COPY --from=build /workspace/target/layers/snapshot-dependencies/ ./
 COPY --from=build /workspace/target/layers/application/ ./
 
 USER 10001
-EXPOSE 8080
+# 8080: public traffic and console. 9080: management (health probes, Prometheus), keep it private.
+EXPOSE 8080 9080
 
 ENV JAVA_TOOL_OPTIONS="-XX:MaxRAMPercentage=75 -XX:+UseG1GC -XX:+ExitOnOutOfMemoryError" \
     SPRING_PROFILES_ACTIVE=prod
 
 HEALTHCHECK --interval=15s --timeout=3s --start-period=30s --retries=3 \
-  CMD wget -qO- http://localhost:8080/actuator/health/liveness || exit 1
+  CMD wget -qO- http://localhost:9080/actuator/health/liveness || exit 1
 
 ENTRYPOINT ["java", "org.springframework.boot.loader.launch.JarLauncher"]

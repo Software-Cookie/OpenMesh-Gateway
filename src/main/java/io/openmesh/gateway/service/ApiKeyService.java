@@ -81,15 +81,21 @@ public class ApiKeyService {
         return redis.opsForHash().size(KEYS_BY_HASH);
     }
 
-    /** Revokes a key by id. Errors with 404 when the id is unknown. */
+    /** Revokes a key by id. Errors with 404 when the id is unknown; a dangling index entry is cleaned up. */
     public Mono<ApiKeyRecord> revoke(String id) {
         return redis.<String, String>opsForHash().get(HASH_BY_ID, id)
                 .switchIfEmpty(Mono.error(ApiException.notFound("API key not found: " + id)))
                 .flatMap(hash -> redis.<String, String>opsForHash().get(KEYS_BY_HASH, hash)
                         .flatMap(this::parse)
-                        .flatMap(record -> redis.opsForHash().remove(KEYS_BY_HASH, hash)
-                                .then(redis.opsForHash().remove(HASH_BY_ID, id))
-                                .thenReturn(record)));
+                        .flatMap(record -> removeEntries(hash, id).thenReturn(record))
+                        .switchIfEmpty(removeEntries(hash, id)
+                                .then(Mono.error(ApiException.notFound("API key not found: " + id)))));
+    }
+
+    private Mono<Void> removeEntries(String hash, String id) {
+        return redis.opsForHash().remove(KEYS_BY_HASH, hash)
+                .then(redis.opsForHash().remove(HASH_BY_ID, id))
+                .then();
     }
 
     /** Looks up the record for a presented key; empty when the key is unknown or malformed. */

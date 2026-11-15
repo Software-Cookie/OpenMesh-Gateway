@@ -1,6 +1,6 @@
 # End-to-end smoke test against a running gateway started with the "dev" profile.
-#   .\scripts\test-gateway.ps1 [-GatewayUrl http://localhost:8080]
-param([string]$GatewayUrl = "http://localhost:8080")
+#   .\scripts\test-gateway.ps1 [-GatewayUrl http://localhost:8080] [-ManagementUrl http://localhost:9080]
+param([string]$GatewayUrl = "http://localhost:8080", [string]$ManagementUrl = "http://localhost:9080")
 
 $ErrorActionPreference = "Stop"
 $script:pass = 0; $script:fail = 0
@@ -28,7 +28,8 @@ function Token($body) {
 Write-Host "OpenMesh Gateway smoke test: $GatewayUrl"
 
 Write-Host "[1] Health"
-Check "gateway is UP" "UP" (Invoke-RestMethod "$GatewayUrl/actuator/health").status
+Check "gateway is UP" "UP" (Invoke-RestMethod "$GatewayUrl/console/health").status
+Check "actuator not on public port" 404 (Status "$GatewayUrl/actuator/prometheus")
 
 Write-Host "[2] Tokens"
 $admin = Token @{ tenantId = "tenant-acme"; userId = "alice"; roles = @("ROLE_ADMIN"); scopes = @("read", "write"); tier = "PRO" }
@@ -68,6 +69,10 @@ $key = Invoke-RestMethod "$GatewayUrl/admin/v1/api-keys" -Method Post -Headers $
 Check "API key authenticates" 200 (Status "$GatewayUrl/service-alpha/orders" @{ "X-API-Key" = $key.apiKey })
 Status "$GatewayUrl/admin/v1/api-keys/$($key.record.id)" $A "DELETE" | Out-Null
 Check "revoked key -> 401" 401 (Status "$GatewayUrl/service-alpha/orders" @{ "X-API-Key" = $key.apiKey })
+
+Write-Host "[9] Metrics"
+$metrics = (Invoke-WebRequest "$ManagementUrl/actuator/prometheus" -UseBasicParsing).Content
+Check "Prometheus exposes gateway metrics" $true ($metrics -match "openmesh_gateway_requests_total")
 
 Write-Host ""
 Write-Host "Passed: $script:pass  Failed: $script:fail"
