@@ -18,11 +18,9 @@
 
     <properties>
         <java.version>21</java.version>
-        <!-- Must match the Boot line: 2025.0.x is the release train for Spring Boot 3.5 -->
-        <spring-cloud.version>2025.0.3</spring-cloud.version>
+        <spring-cloud.version>2023.0.3</spring-cloud.version>
+        <nimbus-jose-jwt.version>10.10</nimbus-jose-jwt.version>
         <jacoco.version>0.8.16</jacoco.version>
-        <!-- JaCoCo appends its agent here; Surefire adds Mockito's -->
-        <argLine></argLine>
         <frontend-maven-plugin.version>2.0.2</frontend-maven-plugin.version>
         <node.version>v24.22.3</node.version>
     </properties>
@@ -103,7 +101,7 @@
         <dependency>
             <groupId>com.squareup.okhttp3</groupId>
             <artifactId>mockwebserver</artifactId>
-            <version>4.12.0</version>
+            <version>5.5.1</version>
             <scope>test</scope>
         </dependency>
         <!-- Real Redis 7 for integration tests (skipped automatically when Docker is unavailable) -->

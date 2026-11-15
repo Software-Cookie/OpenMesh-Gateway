@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
 # ---- UI stage: React console ----
-FROM node:24-alpine AS ui
+FROM node:26-alpine AS ui
 WORKDIR /ui
 COPY frontend/package.json frontend/package-lock.json ./
 RUN npm ci --no-audit --no-fund
@@ -23,7 +23,7 @@ RUN mvn -B -q package -DskipTests -Dskip.npm -Dskip.installnodenpm \
  && java -Djarmode=layertools -jar target/openmesh-gateway-*.jar extract --destination target/layers
 
 # ---- Runtime stage ----
-FROM eclipse-temurin:21-jre-alpine
+FROM eclipse-temurin:25-jre-alpine
 LABEL org.opencontainers.image.title="openmesh-gateway" \
       org.opencontainers.image.description="Cloud-native multi-tenant API gateway and traffic control plane"
 
