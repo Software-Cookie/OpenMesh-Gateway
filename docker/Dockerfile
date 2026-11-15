@@ -23,7 +23,7 @@ RUN mvn -B -q package -DskipTests -Dskip.npm -Dskip.installnodenpm \
  && java -Djarmode=layertools -jar target/openmesh-gateway-*.jar extract --destination target/layers
 
 # ---- Runtime stage ----
-FROM eclipse-temurin:24-jre-alpine
+FROM eclipse-temurin:25-jre-alpine
 LABEL org.opencontainers.image.title="openmesh-gateway" \
       org.opencontainers.image.description="Cloud-native multi-tenant API gateway and traffic control plane"
 
