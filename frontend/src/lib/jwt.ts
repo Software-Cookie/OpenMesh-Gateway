@@ -20,8 +20,3 @@ export function decodeJwt(token: string): JwtClaims | null {
 export function isExpired(claims: JwtClaims, now = Date.now()): boolean {
   return typeof claims.exp === 'number' && claims.exp * 1000 <= now;
 }
-
-export function hasAdminRole(claims: JwtClaims | null): boolean {
-  const roles = claims?.roles;
-  return Array.isArray(roles) && (roles.includes('ROLE_ADMIN') || roles.includes('ADMIN'));
-}

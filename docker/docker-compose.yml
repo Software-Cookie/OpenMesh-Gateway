@@ -14,6 +14,8 @@ services:
     restart: unless-stopped
     ports:
       - "${GATEWAY_PORT:-8080}:8080"
+      # Management port (health, Prometheus): reachable from this machine only
+      - "127.0.0.1:${MANAGEMENT_PORT:-9080}:9080"
     environment:
       SPRING_PROFILES_ACTIVE: dev
       REDIS_HOST: redis
@@ -25,6 +27,9 @@ services:
       OPENMESH_ENVIRONMENT: docker-demo
       # Set to 1 when a reverse proxy (Caddy, nginx) sits in front, so rate limits use the real client IP
       OPENMESH_TRUSTED_PROXY_HOPS: ${TRUSTED_PROXY_HOPS:-0}
+      # Anyone can mint demo admin tokens, so dynamic routes may only target the demo services
+      OPENMESH_ROUTE_ALLOWED_HOSTS: ${ROUTE_ALLOWED_HOSTS:-downstream-service-alpha,downstream-service-beta}
+      OPENMESH_ROUTE_ALLOW_LOOPBACK: "false"
     depends_on:
       redis:
         condition: service_healthy
@@ -52,7 +57,7 @@ services:
     networks: [openmesh-net]
 
   downstream-service-alpha:
-    image: node:20-alpine
+    image: node:24-alpine
     restart: unless-stopped
     working_dir: /app
     command: ["node", "server.js"]
@@ -63,7 +68,7 @@ services:
     networks: [openmesh-net]
 
   downstream-service-beta:
-    image: node:20-alpine
+    image: node:24-alpine
     restart: unless-stopped
     working_dir: /app
     command: ["node", "server.js"]

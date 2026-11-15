@@ -9,6 +9,9 @@ openmesh:
     dev-issuer:
       enabled: true
     identity-signing-secret: ${OPENMESH_IDENTITY_SIGNING_SECRET:dev-only-identity-signing-secret-change-me}
+  routes:
+    # Local mock services run on localhost; shared deployments set OPENMESH_ROUTE_ALLOW_LOOPBACK=false
+    allow-loopback: ${OPENMESH_ROUTE_ALLOW_LOOPBACK:true}
 
 management:
   metrics:

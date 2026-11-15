@@ -1,6 +1,6 @@
 import { describe, expect, it, vi, afterEach } from 'vitest';
 import { ApiError, api, configureApi, send, toCurl } from './api';
-import { decodeJwt, hasAdminRole, isExpired } from './jwt';
+import { decodeJwt, isExpired } from './jwt';
 import { toRatePoint } from './liveMetrics';
 import { formatPercent, formatRate, scopeList, toCsv } from './format';
 import { ADMIN_CLAIMS, fakeJwt, jsonResponse } from '../test/helpers';
@@ -9,17 +9,16 @@ import type { LiveSnapshot } from './types';
 afterEach(() => vi.restoreAllMocks());
 
 describe('jwt', () => {
-  it('decodes claims and detects the admin role', () => {
+  it('decodes claims', () => {
     const claims = decodeJwt(fakeJwt(ADMIN_CLAIMS));
     expect(claims?.sub).toBe('alice');
-    expect(hasAdminRole(claims)).toBe(true);
+    expect(claims?.roles).toEqual(['ROLE_ADMIN']);
     expect(isExpired(claims!)).toBe(false);
   });
 
   it('rejects malformed tokens and flags expiry', () => {
     expect(decodeJwt('not-a-token')).toBeNull();
     expect(isExpired({ sub: 'x', exp: 1 })).toBe(true);
-    expect(hasAdminRole({ sub: 'x', roles: ['ROLE_USER'] })).toBe(false);
   });
 });
 

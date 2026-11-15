@@ -12,6 +12,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.reactive.AutoConfigureWebTestClient;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.web.server.LocalManagementPort;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.test.context.ActiveProfiles;
@@ -48,9 +49,12 @@ class GatewayIntegrationTest {
     private static final List<String> ECHOED = List.of("X-User-Id", "X-Tenant-Id", "X-User-Roles", "X-Auth-Method",
             "X-Gateway-Signature", "X-API-Key", "traceparent");
 
+    // Closed by Testcontainers (@Container) and by stopDownstream() respectively
     @Container
+    @SuppressWarnings("resource")
     static final GenericContainer<?> REDIS = new GenericContainer<>(DockerImageName.parse("redis:7-alpine")).withExposedPorts(6379);
 
+    @SuppressWarnings("resource")
     static final MockWebServer DOWNSTREAM = new MockWebServer();
 
     static {
@@ -95,6 +99,13 @@ class GatewayIntegrationTest {
     @Autowired
     private WebTestClient client;
 
+    @LocalManagementPort
+    private int managementPort;
+
+    private WebTestClient management() {
+        return WebTestClient.bindToServer().baseUrl("http://localhost:" + managementPort).build();
+    }
+
     private String token(String tenant, String role, String tier, String... scopes) {
         Map<String, Object> body = Map.of("tenantId", tenant, "userId", "user-" + tenant, "roles", List.of(role),
                 "scopes", List.of(scopes), "tier", tier);
@@ -112,9 +123,12 @@ class GatewayIntegrationTest {
     }
 
     @Test
-    @DisplayName("Health, console UI and console config are public")
+    @DisplayName("Console UI, config and health are public; actuator lives on the management port only")
     void publicEndpoints() {
-        client.get().uri("/actuator/health").exchange().expectStatus().isOk().expectBody().jsonPath("$.status").isEqualTo("UP");
+        client.get().uri("/console/health").exchange().expectStatus().isOk().expectBody().jsonPath("$.status").isEqualTo("UP");
+        client.get().uri("/actuator/prometheus").exchange().expectStatus().isNotFound();
+        management().get().uri("/actuator/health").exchange().expectStatus().isOk().expectBody().jsonPath("$.status").isEqualTo("UP");
+        management().get().uri("/actuator/prometheus").exchange().expectStatus().isOk();
         client.get().uri("/").exchange().expectStatus().isOk()
                 .expectBody(String.class).value(html -> assertThat(html).contains("OpenMesh Gateway Console"));
         client.get().uri("/console/config").exchange().expectStatus().isOk()
@@ -128,7 +142,7 @@ class GatewayIntegrationTest {
                 .expectBody().jsonPath("$.reason").isEqualTo("UNAUTHENTICATED");
         client.get().uri("/admin/v1/routes").headers(h -> h.setBearerAuth(token("t-user", "ROLE_USER", "PRO", "read")))
                 .exchange().expectStatus().isForbidden();
-        client.get().uri("/actuator/metrics").exchange().expectStatus().isUnauthorized();
+        management().get().uri("/actuator/metrics").exchange().expectStatus().isUnauthorized();
     }
 
     @Test

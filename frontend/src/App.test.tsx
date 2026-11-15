@@ -3,6 +3,7 @@ import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { App } from './App';
 import { ADMIN_CLAIMS, fakeJwt, jsonResponse } from './test/helpers';
+import { decodeJwt } from './lib/jwt';
 
 const OVERVIEW = {
   staticRoutes: 3,
@@ -19,7 +20,14 @@ function mockGateway(devIssuerEnabled = true) {
   return vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
     const url = String(input);
     if (url === '/console/config') return jsonResponse({ devIssuerEnabled, apiKeyHeader: 'X-API-Key', version: '1.0.0' });
-    if (url === '/actuator/health') return jsonResponse({ status: 'UP' });
+    if (url === '/console/health') return jsonResponse({ status: 'UP' });
+    if (url === '/admin/v1/session') {
+      const token = new Headers(init?.headers).get('Authorization')?.replace('Bearer ', '') ?? '';
+      const claims = decodeJwt(token);
+      if (!claims) return jsonResponse({ status: 401, reason: 'UNAUTHENTICATED' }, 401);
+      if (!claims.roles?.includes('ROLE_ADMIN')) return jsonResponse({ status: 403, reason: 'ACCESS_DENIED' }, 403);
+      return jsonResponse({ userId: claims.sub, tenantId: claims.tenant_id, roles: claims.roles });
+    }
     if (url === '/auth/token' && init?.method === 'POST') return jsonResponse({ token: fakeJwt(ADMIN_CLAIMS) });
     if (url === '/admin/v1/overview') return jsonResponse(OVERVIEW);
     if (url === '/admin/v1/metrics/live') {
@@ -44,12 +52,13 @@ describe('console', () => {
     await userEvent.click(button);
 
     expect(await screen.findByRole('heading', { name: 'Dashboard' })).toBeInTheDocument();
+    expect(screen.getByText('alice')).toBeInTheDocument();
     expect(await screen.findByText('1.2K')).toBeInTheDocument();
     expect(await screen.findByText('betaCircuitBreaker')).toBeInTheDocument();
     expect(screen.getByText('Open')).toBeInTheDocument();
   });
 
-  it('refuses tokens without the admin role', async () => {
+  it('refuses tokens the gateway says lack the admin role', async () => {
     mockGateway(false);
     render(<App />);
 

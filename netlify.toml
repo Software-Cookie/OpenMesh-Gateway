@@ -1,5 +1,5 @@
 # Netlify hosts the React console; every API call is forwarded to the gateway on the Oracle server.
-# Replace openmesh-siva.duckdns.org below with your own DuckDNS address.
+# Replace openmesh-siva.duckdns.org below with your own gateway address.
 
 [build]
   base    = "frontend"
@@ -7,7 +7,7 @@
   publish = "dist"
 
 [build.environment]
-  NODE_VERSION = "20"
+  NODE_VERSION = "24"
 
 # Files that exist in dist (index.html, /assets/...) are served by Netlify.
 # Everything else (/console/config, /auth/token, /admin/..., /service-alpha/...) goes to the gateway.
@@ -16,3 +16,20 @@
   to     = "https://openmesh-siva.duckdns.org/:splat"
   status = 200
   force  = false
+
+# Same policy the gateway sends: the console has no inline scripts or styles.
+[[headers]]
+  for = "/*"
+  [headers.values]
+    Content-Security-Policy = "default-src 'self'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+    Strict-Transport-Security = "max-age=31536000; includeSubDomains"
+    X-Content-Type-Options = "nosniff"
+    X-Frame-Options = "DENY"
+    Referrer-Policy = "no-referrer"
+    Permissions-Policy = "camera=(), microphone=(), geolocation=()"
+
+# Content-hashed bundles never change, so browsers may cache them for a year
+[[headers]]
+  for = "/assets/*"
+  [headers.values]
+    Cache-Control = "public, max-age=31536000, immutable"

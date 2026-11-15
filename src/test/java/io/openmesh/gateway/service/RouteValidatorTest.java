@@ -5,6 +5,7 @@ import io.openmesh.gateway.model.RouteDefinitionDto;
 import io.openmesh.gateway.web.ApiException;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.springframework.boot.autoconfigure.web.reactive.WebFluxProperties;
 import org.springframework.cloud.gateway.filter.factory.AddRequestHeaderGatewayFilterFactory;
 import org.springframework.cloud.gateway.filter.factory.StripPrefixGatewayFilterFactory;
 import org.springframework.cloud.gateway.handler.predicate.MethodRoutePredicateFactory;
@@ -21,7 +22,7 @@ class RouteValidatorTest {
 
     private RouteValidator validator(OpenMeshProperties properties) {
         return new RouteValidator(
-                List.of(new PathRoutePredicateFactory(), new MethodRoutePredicateFactory()),
+                List.of(new PathRoutePredicateFactory(new WebFluxProperties()), new MethodRoutePredicateFactory()),
                 List.of(new StripPrefixGatewayFilterFactory(), new AddRequestHeaderGatewayFilterFactory()),
                 properties);
     }
@@ -81,5 +82,43 @@ class RouteValidatorTest {
         assertThatThrownBy(() -> v.validate(route("http://evil.example.com", List.of("Path=/o/**"), List.of())))
                 .isInstanceOf(ApiException.class)
                 .hasMessageContaining("Invalid route definition");
+    }
+
+    @Test
+    @DisplayName("Blocks loopback targets unless explicitly allowed")
+    void blocksLoopback() {
+        RouteValidator strict = validator(new OpenMeshProperties());
+        for (String uri : List.of("http://localhost:9080", "http://127.0.0.1", "http://127.1.2.3:80", "http://[::1]:9080",
+                "http://0.0.0.0", "http://admin.localhost")) {
+            assertThatThrownBy(() -> strict.validate(route(uri, List.of("Path=/x/**"), List.of())))
+                    .as(uri)
+                    .isInstanceOf(ApiException.class)
+                    .satisfies(e -> assertThat(((ApiException) e).getDetails()).anyMatch(d -> d.endsWith("is blocked")));
+        }
+
+        OpenMeshProperties relaxed = new OpenMeshProperties();
+        relaxed.getRoutes().setAllowLoopback(true);
+        validator(relaxed).validate(route("http://localhost:8081", List.of("Path=/x/**"), List.of()));
+    }
+
+    @Test
+    @DisplayName("Rejects filters that choose the upstream URI and forwards outside the fallback controller")
+    void rejectsUpstreamOverrideAndForwards() {
+        RouteValidator v = validator(new OpenMeshProperties());
+
+        assertThatThrownBy(() -> v.validate(route("http://orders:8080", List.of("Path=/x/**"),
+                List.of("RequestHeaderToRequestUri=X-Target"))))
+                .isInstanceOf(ApiException.class)
+                .satisfies(e -> assertThat(((ApiException) e).getDetails())
+                        .containsExactly("filter 'RequestHeaderToRequestUri' is not allowed on dynamic routes"));
+
+        assertThatThrownBy(() -> v.validate(route("http://orders:8080", List.of("Path=/x/**"),
+                List.of("AddRequestHeader=X-Next,forward:/admin/v1/api-keys"))))
+                .isInstanceOf(ApiException.class)
+                .satisfies(e -> assertThat(((ApiException) e).getDetails())
+                        .containsExactly("filter 'AddRequestHeader' may only forward to forward:/fallback/..."));
+
+        v.validate(route("http://orders:8080", List.of("Path=/x/**"),
+                List.of("AddRequestHeader=X-Next,forward:/fallback/service-unavailable")));
     }
 }
