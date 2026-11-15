@@ -18,13 +18,13 @@
 
     <properties>
         <java.version>21</java.version>
-        <spring-cloud.version>2023.0.3</spring-cloud.version>
-        <nimbus-jose-jwt.version>10.10</nimbus-jose-jwt.version>
-        <jacoco.version>0.8.12</jacoco.version>
+        <!-- Must match the Boot line: 2025.0.x is the release train for Spring Boot 3.5 -->
+        <spring-cloud.version>2025.0.3</spring-cloud.version>
+        <jacoco.version>0.8.16</jacoco.version>
+        <!-- JaCoCo appends its agent here; Surefire adds Mockito's -->
+        <argLine></argLine>
         <frontend-maven-plugin.version>2.0.2</frontend-maven-plugin.version>
-        <node.version>v20.17.0</node.version>
-        <!-- 1.21.4+ supports Docker Engine 29 (minimum API 1.44) -->
-        <testcontainers.version>1.21.4</testcontainers.version>
+        <node.version>v24.22.3</node.version>
     </properties>
 
     <dependencies>
@@ -144,6 +144,8 @@
               Skip with -Dskip.npm -Dskip.installnodenpm (e.g. when the UI was built separately).
             -->
             <plugin>
+                <!-- Keeps the IDE's background builds from running npm and racing the command-line build -->
+                <?m2e ignore?>
                 <groupId>com.github.eirslett</groupId>
                 <artifactId>frontend-maven-plugin</artifactId>
                 <version>${frontend-maven-plugin.version}</version>

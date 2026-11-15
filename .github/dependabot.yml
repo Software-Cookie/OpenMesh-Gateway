@@ -2,11 +2,38 @@ version: 2
 updates:
   - package-ecosystem: maven
     directory: /
+    target-branch: dev
     schedule: { interval: weekly }
     open-pull-requests-limit: 5
+    groups:
+      # Boot and Cloud versions must move together, so they arrive in one PR
+      spring:
+        patterns: ["org.springframework.boot*", "org.springframework.cloud*"]
+    ignore:
+      # Spring Boot 4 (and Spring Cloud 2025.1+, which requires it) is a planned migration, not a bump
+      - dependency-name: "org.springframework.boot:*"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "org.springframework.cloud:spring-cloud-dependencies"
+        versions: [">=2025.1.0"]
+      # OkHttp 5 needs Kotlin 2, which conflicts with the Kotlin version Spring Boot 3.5 manages
+      - dependency-name: "com.squareup.okhttp3:mockwebserver"
+        update-types: ["version-update:semver-major"]
   - package-ecosystem: docker
     directory: /docker
+    target-branch: dev
     schedule: { interval: weekly }
+    ignore:
+      # Node and Java majors are chosen deliberately (LTS lines only), matching CI and the Maven build
+      - dependency-name: "node"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "eclipse-temurin"
+        update-types: ["version-update:semver-major"]
+  - package-ecosystem: npm
+    directory: /frontend
+    target-branch: dev
+    schedule: { interval: weekly }
+    open-pull-requests-limit: 5
   - package-ecosystem: github-actions
     directory: /
+    target-branch: dev
     schedule: { interval: monthly }
